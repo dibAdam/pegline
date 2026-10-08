@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- .NET Framework 4.8 ships with every Windows 10 and 11 PC, so the result
+       is one small exe with nothing else to install. Modern C# still applies. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>Pegline</AssemblyName>
+    <RootNamespace>Pegline</RootNamespace>
+    <StartupObject>Pegline.Program</StartupObject>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Pegline.ico</ApplicationIcon>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <DebugType>embedded</DebugType>
+    <Version>1.1.0</Version>
+    <Product>Pegline</Product>
+    <Description>Screenshots, pegged to a line at the top of your screen.</Description>
+    <Copyright>MIT License. A Windows port of Tendedero by Alejandro Buján.</Copyright>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Microsoft.VisualBasic" />
+    <Resource Include="Assets\Pegline.ico" />
+  </ItemGroup>
+
+</Project>
