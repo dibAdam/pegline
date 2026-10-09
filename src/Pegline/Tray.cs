@@ -43,6 +43,13 @@ namespace Pegline
             image = next;
         }
 
+        /// <summary>A Windows notification from the tray icon, pointing at it.</summary>
+        public void ShowTip(string title, string text)
+        {
+            try { icon.ShowBalloonTip(6000, title, text, WF.ToolTipIcon.None); }
+            catch (Exception e) { Log.Error("Could not show a notification", e); }
+        }
+
         public void Dispose()
         {
             Theme.Changed -= UpdateImage;

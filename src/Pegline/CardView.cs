@@ -76,6 +76,7 @@ namespace Pegline
         readonly TranslateTransform shadeShift = new TranslateTransform();
         readonly Image clip = new Image { Stretch = Stretch.Fill, IsHitTestVisible = false };
         readonly Border sheen;
+        readonly Border ring;
         readonly Border cross;
         readonly ScaleTransform crossScale = new ScaleTransform(0.6, 0.6, 10, 10);
         readonly Border badge;
@@ -137,6 +138,17 @@ namespace Pegline
             };
             card.Children.Add(face);
             card.Children.Add(sheen);
+            // The keyboard's choice: a ring in the accent color around the card.
+            ring = new Border
+            {
+                CornerRadius = new CornerRadius(Layout.FrameRadius + 4),
+                BorderThickness = new Thickness(2.5),
+                Margin = new Thickness(-5),
+                IsHitTestVisible = false,
+                Visibility = Visibility.Collapsed
+            };
+            ring.SetResourceReference(Border.BorderBrushProperty, "Pl.Accent");
+            card.Children.Add(ring);
             card.RenderTransform = zoomTransform;
             Canvas.SetTop(card, Layout.CardOffsetBelowTop);
             body.Children.Add(card);
@@ -547,7 +559,9 @@ namespace Pegline
 
         public void RefreshState()
         {
-            bool h = line.HoveredId == Item.Id && !Item.Falling;
+            bool chosen = line.SelectedId == Item.Id && !Item.Falling;
+            ring.Visibility = chosen ? Visibility.Visible : Visibility.Collapsed;
+            bool h = (line.HoveredId == Item.Id || chosen) && !Item.Falling;
             bool p = line.PressedId == Item.Id;
             bool d = line.DraggingId == Item.Id;
             bool c = line.CopiedId == Item.Id;
@@ -752,7 +766,8 @@ namespace Pegline
             var menu = new ContextMenu();
             menu.Items.Add(Menus.Item(L("Copy", "Copiar", "Copier"), () => line.Copy(id)));
             menu.Items.Add(Menus.Item(L("Open", "Abrir", "Ouvrir"), () => line.Open(id)));
-            menu.Items.Add(Menus.Item(L("Edit", "Editar", "Modifier"), () => line.Edit(id)));
+            menu.Items.Add(Menus.Item(L("Mark up", "Marcar", "Annoter"), () => line.Edit(id), gesture: L("Hold", "Mantener", "Maintenir")));
+            menu.Items.Add(Menus.Item(L("Edit in another app", "Editar en otra app", "Modifier dans une autre app"), () => line.EditElsewhere(id)));
             menu.Items.Add(Menus.Item(L("Pin to screen", "Fijar en la pantalla", "Épingler à l’écran"), () => host.RequestPin(this, follow: false),
                                       gesture: L("Shift+drag", "Mayús+arrastrar", "Maj+glisser")));
             menu.Items.Add(Menus.Item(L("Show in Explorer", "Mostrar en el Explorador", "Afficher dans l’Explorateur"), () => line.Reveal(id)));

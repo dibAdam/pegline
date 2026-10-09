@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using static Pegline.Loc;
@@ -12,10 +14,12 @@ namespace Pegline
 {
     /// <summary>
     /// The transparent strip along the top of a display: the rope and the
-    /// photos hanging from it. It floats over every app, never takes focus,
-    /// and lets clicks through everywhere except over the photos.
+    /// photos hanging from it. It floats over every app, never takes focus
+    /// unless you open it from the keyboard, and lets clicks through
+    /// everywhere except over the photos and its few controls.
     /// Tucked away, the whole line waits above the top edge and slides down
-    /// when called, the way an auto-hiding taskbar does.
+    /// when called, the way an auto-hiding taskbar does; a small tab shows
+    /// that something is waiting.
     /// </summary>
     sealed class LineWindow : OverlayWindow
     {
@@ -25,19 +29,28 @@ namespace Pegline
         });
         static readonly Brush DropEdge = Frozen(new SolidColorBrush(Color.FromArgb(0x90, 0x5A, 0x8C, 0xB0)));
 
+        /// <summary>How long the pointer rests on a photo before the big preview opens.</summary>
+        const double PreviewDelay = 0.55;
+
         readonly Line line;
         readonly Canvas stage = new Canvas();
+        readonly Canvas chrome = new Canvas();
         readonly TranslateTransform shift = new TranslateTransform();
         readonly RopeView ropeView = new RopeView();
         readonly LightsView lights = new LightsView();
         readonly Canvas drops = new Canvas { IsHitTestVisible = false };
-        readonly Border hint;
-        readonly Motion reveal, hintFade;
+        readonly Border hint, tab, older, newer;
+        readonly TextBlock tabCount, olderText, newerText;
+        readonly Motion reveal, hintFade, tabFade;
         readonly Dictionary<Guid, CardView> cards = new Dictionary<Guid, CardView>();
-        readonly DispatcherTimer weather;
+        readonly DispatcherTimer weather, hoverTimer, unhoverTimer;
+        readonly PreviewWindow preview = new PreviewWindow();
         readonly Random random = new Random();
         Point? lastPointer;
         DateTime lastPointerAt;
+        Guid? hoverTarget;
+        bool keyboard;
+        IntPtr previousForeground;
 
         static double Hidden => -(Layout.PanelHeight + 12);
 
@@ -47,6 +60,10 @@ namespace Pegline
 
         /// <summary>A photo asks to come off the line and be pinned to the screen: the photo, where it is on screen, and whether it follows the pointer.</summary>
         public event Action<Pegged, PxRect, bool> PinRequested;
+        /// <summary>The pull tab was clicked.</summary>
+        public event Action TabClicked;
+        /// <summary>Escape, from the keyboard.</summary>
+        public event Action CloseRequested;
 
         public LineWindow(Line line) : base(clickThrough: true)
         {
@@ -55,7 +72,7 @@ namespace Pegline
             Rope.Moved += OnRopeMoved;
 
             stage.RenderTransform = shift;
-            Content = stage;
+            Content = new Grid { Children = { stage, chrome } };
             stage.Children.Add(ropeView);
             stage.Children.Add(lights);
             hint = MakeHint();
@@ -63,8 +80,23 @@ namespace Pegline
             Panel.SetZIndex(drops, 10000);
             stage.Children.Add(drops);
 
+            older = Pill(out olderText, () => line.ScrollOlder());
+            newer = Pill(out newerText, () => line.BackToNewest());
+            Panel.SetZIndex(older, 9000);
+            Panel.SetZIndex(newer, 9000);
+            stage.Children.Add(older);
+            stage.Children.Add(newer);
+
+            tab = MakeTab(out tabCount);
+            chrome.Children.Add(tab);
+
             reveal = new Motion(Hidden, v => shift.Y = v, 0.05);
             hintFade = new Motion(0, v => hint.Opacity = v, 0.002);
+            tabFade = new Motion(0, v =>
+            {
+                tab.Opacity = v;
+                tab.Visibility = v > 0.001 ? Visibility.Visible : Visibility.Collapsed;
+            }, 0.002);
 
             SizeChanged += (s, e) =>
             {
@@ -80,7 +112,11 @@ namespace Pegline
                 Rope.Wake();
             };
             line.Gust += Gust;
-            line.StateChanged += () => { foreach (var card in cards.Values) card.RefreshState(); };
+            line.StateChanged += () =>
+            {
+                foreach (var card in cards.Values) card.RefreshState();
+                UpdatePreview();
+            };
             line.RevealedChanged += OnRevealedChanged;
 
             // The cards are baked bitmaps: a new theme or display scale means baking them again.
@@ -89,6 +125,22 @@ namespace Pegline
             weather = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             weather.Tick += (s, e) => Weather();
             weather.Start();
+            hoverTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(PreviewDelay) };
+            hoverTimer.Tick += (s, e) =>
+            {
+                hoverTimer.Stop();
+                ShowPreview(hoverTarget);
+            };
+            unhoverTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(0.2) };
+            unhoverTimer.Tick += (s, e) =>
+            {
+                unhoverTimer.Stop();
+                if (hoverTarget == null) preview.HideNow();
+            };
+
+            PreviewMouseWheel += OnWheel;
+            PreviewKeyDown += OnKey;
+            Deactivated += (s, e) => ExitKeyboard(restoreFocus: false);
 
             Relayout();
             Sync();
@@ -120,6 +172,78 @@ namespace Pegline
                 Foreground = Palette.Secondary
             }
         };
+
+        /// <summary>A small tab hanging from the top edge, with how many photos are waiting behind it.</summary>
+        Border MakeTab(out TextBlock count)
+        {
+            count = new TextBlock
+            {
+                FontFamily = Visuals.UiFont,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = Palette.Primary,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 5, 1)
+            };
+            var chevron = new TextBlock
+            {
+                Text = "",
+                FontFamily = Visuals.IconFont,
+                FontSize = 8,
+                Foreground = Palette.Secondary,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var pin = new Border
+            {
+                Width = 4,
+                Height = 10,
+                CornerRadius = new CornerRadius(1.5),
+                Margin = new Thickness(0, 0, 6, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Background = new LinearGradientBrush(Color.FromRgb(232, 232, 232), Color.FromRgb(160, 160, 160), 0)
+            };
+            var t = new Border
+            {
+                Height = 20,
+                CornerRadius = new CornerRadius(0, 0, 10, 10),
+                Padding = new Thickness(11, 0, 10, 1),
+                Background = Palette.Capsule,
+                BorderBrush = Palette.Edge,
+                BorderThickness = new Thickness(0.75, 0, 0.75, 0.75),
+                Visibility = Visibility.Collapsed,
+                Cursor = Cursors.Hand,
+                ToolTip = L("Show the line", "Mostrar el tendedero", "Afficher le fil"),
+                Child = new StackPanel { Orientation = Orientation.Horizontal, Children = { pin, count, chevron } },
+                Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 8, ShadowDepth = 2, Direction = 270, Opacity = 0.3 }
+            };
+            t.MouseLeftButtonUp += (s, e) => TabClicked?.Invoke();
+            return t;
+        }
+
+        /// <summary>A small clickable label at an end of the line, for looking back through older captures.</summary>
+        Border Pill(out TextBlock text, Action click)
+        {
+            text = new TextBlock
+            {
+                FontFamily = Visuals.UiFont,
+                FontSize = 11.5,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = Palette.Primary
+            };
+            var p = new Border
+            {
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(10, 4, 10, 5),
+                Background = Palette.Capsule,
+                BorderBrush = Palette.Edge,
+                BorderThickness = new Thickness(0.75),
+                Visibility = Visibility.Collapsed,
+                Cursor = Cursors.Hand,
+                Child = text
+            };
+            p.MouseLeftButtonUp += (s, e) => click();
+            return p;
+        }
 
         protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
         {
@@ -157,6 +281,7 @@ namespace Pegline
             Rope.Resize(w);
             hint.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             Canvas.SetLeft(hint, (w - hint.DesiredSize.Width) / 2);
+            PlaceTab();
             OnRopeMoved();
         }
 
@@ -173,6 +298,7 @@ namespace Pegline
             lights.Follow(Rope);
             double w = StageWidth;
             Canvas.SetTop(hint, Rope.YAt(w / 2) + 34 - hint.DesiredSize.Height / 2);
+            PlacePills();
         }
 
         void Sync()
@@ -208,6 +334,11 @@ namespace Pegline
 
             double hintTarget = items.Count == 0 ? 1 : 0;
             if (hintFade.Target != hintTarget) hintFade.Tween(hintTarget, 0.3, Ease.InOut);
+            UpdatePills();
+            tabCount.Text = line.LiveCount.ToString();
+            PlaceTab();
+            if (keyboard && line.SelectedId != null && line.Find(line.SelectedId.Value) == null)
+                line.SelectedId = line.Live.LastOrDefault()?.Id;
         }
 
         void OnRevealedChanged()
@@ -221,8 +352,219 @@ namespace Pegline
                 reveal.Tween(Hidden, 0.22, Ease.In);
                 ClickThrough = true;
                 lastPointer = null;
+                preview.HideNow();
+                if (keyboard) ExitKeyboard(restoreFocus: true);
             }
             lights.SetRevealed(line.Revealed);
+            UpdatePills();
+        }
+
+        // MARK: The pull tab
+
+        /// <summary>Shown while the line is tucked away with photos on it, unless switched off.</summary>
+        public void SetTab(bool show)
+        {
+            tabCount.Text = line.LiveCount.ToString();
+            PlaceTab();
+            double target = show ? 1 : 0;
+            if (tabFade.Target != target) tabFade.Tween(target, show ? 0.25 : 0.12, Ease.Out);
+        }
+
+        void PlaceTab()
+        {
+            tab.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            Canvas.SetLeft(tab, (StageWidth - tab.DesiredSize.Width) / 2);
+            Canvas.SetTop(tab, 0);
+        }
+
+        public bool OverTab(POINT p)
+        {
+            if (tab.Visibility != Visibility.Visible || tab.Opacity < 0.5) return false;
+            var local = ToLocal(p);
+            var r = new Rect(Canvas.GetLeft(tab), 0, tab.DesiredSize.Width, tab.DesiredSize.Height);
+            r.Inflate(4, 4);
+            return r.Contains(local);
+        }
+
+        // MARK: Looking back
+
+        void UpdatePills()
+        {
+            bool show = line.Revealed;
+            int olderCount = line.OlderCount, newerCount = line.NewerCount;
+            olderText.Text = "‹  " + string.Format(L("{0} older", "{0} anteriores", "{0} plus anciennes"), olderCount);
+            newerText.Text = string.Format(L("Back to newest ({0})", "Volver a las recientes ({0})", "Revenir aux récentes ({0})"), newerCount) + "  ›";
+            older.Visibility = show && olderCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+            newer.Visibility = show && newerCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+            PlacePills();
+        }
+
+        void PlacePills()
+        {
+            double w = StageWidth;
+            older.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            newer.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            Canvas.SetLeft(older, 24);
+            Canvas.SetTop(older, Rope.YAt(60) + 12);
+            Canvas.SetLeft(newer, w - 24 - newer.DesiredSize.Width);
+            Canvas.SetTop(newer, Rope.YAt(w - 60) + 12);
+        }
+
+        /// <summary>Whether the pointer is over one of the line's own controls, which need the click.</summary>
+        public bool OverControl(POINT p)
+        {
+            if (OverTab(p)) return true;
+            if (!line.Revealed) return false;
+            var local = ToLocal(p);
+            local.Y -= shift.Y;
+            foreach (var pill in new[] { older, newer })
+            {
+                if (pill.Visibility != Visibility.Visible) continue;
+                var r = new Rect(Canvas.GetLeft(pill), Canvas.GetTop(pill), pill.DesiredSize.Width, pill.DesiredSize.Height);
+                r.Inflate(3, 3);
+                if (r.Contains(local)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Scrolling over the photos walks back through older captures, and forward again.</summary>
+        void OnWheel(object sender, MouseWheelEventArgs e)
+        {
+            e.Handled = true;
+            if (e.Delta < 0) line.ScrollOlder();
+            else line.ScrollNewer();
+        }
+
+        // MARK: The big preview
+
+        Guid? PreviewTarget()
+        {
+            if (!line.Revealed || CardView.IsDragging || line.PressedId != null) return null;
+            if (keyboard) return line.SelectedId;
+            return Settings.GetBool("PreviewOff") ? null : line.HoveredId;
+        }
+
+        void UpdatePreview()
+        {
+            var target = PreviewTarget();
+            if (target == hoverTarget) return;
+            hoverTarget = target;
+            hoverTimer.Stop();
+            if (target == null)
+            {
+                // A short grace, so moving from one photo to the next does not flicker.
+                unhoverTimer.Stop();
+                unhoverTimer.Start();
+                return;
+            }
+            unhoverTimer.Stop();
+            if (keyboard || preview.ShownId != null) ShowPreview(target);
+            else hoverTimer.Start();
+        }
+
+        void ShowPreview(Guid? id)
+        {
+            if (id == null || id != PreviewTarget() || Monitor == null) return;
+            if (!cards.TryGetValue(id.Value, out var card) || !card.IsTouchable) return;
+            try
+            {
+                preview.ShowFor(card.Item, card.PhotoOnScreen(), Monitors.Find(Monitor.Device) ?? Monitor, keyboard);
+            }
+            catch (InvalidOperationException)
+            {
+                // Not on screen at this instant.
+            }
+        }
+
+        // MARK: Keyboard
+
+        /// <summary>
+        /// Opened with the shortcut: the line takes the keyboard, so photos can be
+        /// chosen with the arrows and acted on with a key. Focus goes back to
+        /// where it was when the line tucks away.
+        /// </summary>
+        public void EnterKeyboard()
+        {
+            if (keyboard || line.LiveCount == 0) return;
+            keyboard = true;
+            previousForeground = Native.GetForegroundWindow();
+            Activatable = true;
+            Focusable = true;
+            Activate();
+            Native.SetForegroundWindow(Handle);
+            Focus();
+            Keyboard.Focus(this);
+            line.SelectedId = line.Live.LastOrDefault()?.Id;
+            UpdatePreview();
+        }
+
+        public void ExitKeyboard(bool restoreFocus)
+        {
+            if (!keyboard) return;
+            keyboard = false;
+            line.SelectedId = null;
+            Focusable = false;
+            Activatable = false;
+            if (restoreFocus && previousForeground != IntPtr.Zero && Native.GetForegroundWindow() == Handle)
+                Native.SetForegroundWindow(previousForeground);
+            previousForeground = IntPtr.Zero;
+            UpdatePreview();
+        }
+
+        void OnKey(object sender, KeyEventArgs e)
+        {
+            if (!keyboard) return;
+            var live = line.Live;
+            int i = live.FindIndex(x => x.Id == line.SelectedId);
+            var selected = i >= 0 ? live[i] : null;
+            bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+            e.Handled = true;
+            switch (e.Key)
+            {
+                case Key.Left:
+                    if (i > 0) line.SelectedId = live[i - 1].Id;
+                    else if (line.ScrollOlder()) line.SelectedId = line.Live.FirstOrDefault()?.Id;
+                    break;
+                case Key.Right:
+                    if (i >= 0 && i < live.Count - 1) line.SelectedId = live[i + 1].Id;
+                    else if (line.ScrollNewer()) line.SelectedId = line.Live.LastOrDefault()?.Id;
+                    break;
+                case Key.Home:
+                    if (live.Count > 0) line.SelectedId = live[0].Id;
+                    break;
+                case Key.End:
+                    if (live.Count > 0) line.SelectedId = live[live.Count - 1].Id;
+                    break;
+                case Key.Enter:
+                case Key.C:
+                    if (selected != null) line.Copy(selected.Id);
+                    break;
+                case Key.E:
+                    if (selected != null) line.Edit(selected.Id);
+                    break;
+                case Key.O:
+                    if (selected != null) line.Open(selected.Id);
+                    break;
+                case Key.P:
+                    if (selected != null && cards.TryGetValue(selected.Id, out var card)) RequestPin(card, follow: false);
+                    break;
+                case Key.Delete:
+                case Key.Back:
+                    if (selected == null) break;
+                    var next = i + 1 < live.Count ? live[i + 1] : i > 0 ? live[i - 1] : null;
+                    line.Discard(selected.Id);
+                    line.SelectedId = next?.Id;
+                    break;
+                case Key.Z:
+                    if (ctrl) Undo.Perform();
+                    break;
+                case Key.Escape:
+                    CloseRequested?.Invoke();
+                    break;
+                default:
+                    e.Handled = false;
+                    break;
+            }
         }
 
         // MARK: Wind and weather
@@ -342,6 +684,13 @@ namespace Pegline
         {
             var card = cards.Values.FirstOrDefault(c => c.IsTouchable);
             if (card != null && line.Revealed) RequestPin(card, follow: false);
+        }
+
+        /// <summary>Development: shows the big preview for the first photo.</summary>
+        public void PreviewFirst()
+        {
+            var card = cards.Values.FirstOrDefault(c => c.IsTouchable);
+            if (card != null && line.Revealed) preview.ShowFor(card.Item, card.PhotoOnScreen(), Monitor, keyboard: false);
         }
 
         // MARK: Geometry

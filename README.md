@@ -18,29 +18,45 @@ endorsed by Tendedero's author.
 
 ## Out of sight. Within reach.
 
-Every screenshot you take hangs on a line just above your screen. Push the
-pointer against the top edge and the line glides down. Move away and it's gone.
+Every screenshot you take hangs on a line just above your screen. While photos wait,
+a small tab at the top of the screen shows how many. Click it, rest the pointer against
+the top edge, or press the shortcut, and the line glides down. Move away and it's gone.
 
 | | |
 |:--|:--|
 | Click | Copy the image. It pastes into apps as a picture and into folders as a file. |
-| Press and hold | Open it in your image editor (Paint, unless you picked another). |
+| Press and hold | Mark it up: crop, pen, arrow, box, highlight, blur, text. |
+| Hover for a moment | See it large, with a reminder of every gesture. |
 | Double click | Open it in your image viewer. |
 | Drag into an app | Send a copy. It stays on the line. |
 | Drag into a folder | Keep it there. It leaves the line. |
-| Drag to the Recycle Bin, or click the cross | Let it go. |
+| Drag to the Recycle Bin, or click the cross | Let it go. An *Undo* appears for a few seconds. |
 | <kbd>Shift</kbd>&nbsp;+ drag, or right click › Pin to screen | Pin it to the screen like a fridge magnet. |
-| Right click | Copy, open, edit, pin, show in Explorer, take down. |
-| Sweep the pointer quickly past the photos | They swing. |
-| Rest the pointer against the top edge | Bring the line down on that display. |
+| Scroll over the photos | Walk back through older captures that fell off the end, and forward again. |
+| Right click | Copy, open, mark up, pin, show in Explorer, take down. |
+| Rest the pointer against the top edge, or click the tab | Bring the line down. |
 | Click along the top of the screen | Put it away. |
-| <kbd>Ctrl</kbd>&thinsp;<kbd>Alt</kbd>&thinsp;<kbd>T</kbd> | Show or hide the line. |
-| Left click the tray icon | Show or hide the line. Right click for the menu. |
+| <kbd>Ctrl</kbd>&thinsp;<kbd>Alt</kbd>&thinsp;<kbd>T</kbd> | Show or hide the line, and take the keyboard (below). You can change it in Settings. |
+| Left click the tray icon | Show or hide the line. Right click for Settings. |
+
+Opened from the keyboard, the line can be used without the mouse:
+
+| | |
+|:--|:--|
+| <kbd>←</kbd> <kbd>→</kbd> | Choose a photo; past the ends, older or newer captures |
+| <kbd>Enter</kbd> | Copy |
+| <kbd>E</kbd> / <kbd>O</kbd> / <kbd>P</kbd> | Mark up / Open / Pin |
+| <kbd>Delete</kbd> | Let it go |
+| <kbd>Ctrl</kbd>&thinsp;<kbd>Z</kbd> | Undo |
+| <kbd>Esc</kbd> | Close, and return to what you were doing |
+
+The first time Pegline starts, a three-page tour shows the essentials. It is in the tray
+menu under *How to use Pegline* whenever you want it again.
 
 Pegline never takes screenshots itself. Keep using <kbd>Win</kbd>&thinsp;<kbd>Shift</kbd>&thinsp;<kbd>S</kbd>,
 <kbd>Win</kbd>&thinsp;<kbd>PrtScn</kbd>, the Snipping Tool, ShareX or anything else that saves
 to your Screenshots folder. Pegline finds that folder wherever it lives, even when OneDrive
-has moved it, and you can point it at another folder from the tray menu.
+has moved it, and you can point it at another folder in Settings.
 
 A capture flies up to the line from where you took it: a whole display, the window
 under the pointer, or the region you just snipped.
@@ -77,6 +93,23 @@ Leave one hanging for a day and its corner starts to curl, a little more each da
 hint to keep it or let it go. After sunset the line becomes a string of warm fairy lights,
 judged from the clock and the season alone, without location or network.
 
+## Mark it up.
+
+Press and hold a photo, or press <kbd>E</kbd> with it chosen, and it opens in Pegline's own
+editor: crop, pen, arrow, box, highlight and blur, to hide anything that should not be
+shared, plus text. Pick from seven colors and three sizes. Every step can be undone.
+*Save* writes over the screenshot in its own format and the photo on the line updates;
+*Copy* puts the marked-up image on the clipboard without saving. Each tool has a key:
+<kbd>C</kbd> <kbd>P</kbd> <kbd>A</kbd> <kbd>R</kbd> <kbd>H</kbd> <kbd>B</kbd> <kbd>T</kbd>, sizes <kbd>1</kbd>–<kbd>3</kbd>.
+*Edit in another app* is still in the right-click menu.
+
+## Settings.
+
+Everything is in one window, from the tray menu: the shortcut (click it and press new
+keys), how many photos hang before the oldest steps back into history, the pull tab,
+hover previews, bringing the line down at the top edge, the watched folder, handling
+screenshots, sounds, the evening lights and opening at login.
+
 ## Your Screenshots folder. Finally clear.
 
 Let Pegline handle your screenshots<sup>1</sup> and new captures move into its own
@@ -111,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 This puts `Pegline.exe` in `%LOCALAPPDATA%\Programs\Pegline`, adds it to the Start menu and
 starts it. Windows 11 tucks new tray icons into the **^** overflow; drag Pegline's onto the
-taskbar to keep it in view. Turn on *Open at login* from its menu.
+taskbar to keep it in view. Turn on *Open at login* in Settings.
 
 `scripts\uninstall.ps1` removes it again. It never deletes your screenshots.
 
@@ -137,6 +170,7 @@ Useful switches while developing:
 | `--quit` | Ask the running copy to quit |
 | `--gpu` | Render on the GPU instead of the CPU |
 | `--preview-menu` | Open the tray menu in the middle of the screen, for screenshots |
+| `--preview name` | Show one part: `settings`, `tour`, `editor`, `preview`, `keyboard`, `undo`, `tab`, `history`, or `editortest`, which draws, crops and saves the first photo |
 | `--demo` | Keep the line down and pluck it and send gusts every couple of seconds |
 | `--night` | Light the fairy lights whatever the time |
 
@@ -153,6 +187,11 @@ Launching Pegline again while it runs brings the line down.
 | `CardView.cs` | One photo: glass frame, clip, swing, breeze, drying, curl, click, hold, drag | `PeggedView.swift`, `GrabArea.swift` |
 | `Rope.cs` | The line as a string under tension, its drawing, and the fairy lights | |
 | `Pins.cs` | Photos pinned to the screen | |
+| `Editor.cs` | The markup editor | `Markup.swift` |
+| `Preview.cs` | The large preview on hover or keyboard choice | |
+| `Undo.cs` | Undo after taking down or discarding, and its pill | |
+| `SettingsWindow.cs` | Settings | |
+| `Tour.cs` | The first-run tour | |
 | `Flight.cs` | A capture flying to the line, a card falling off, the drag preview | `CaptureFlight.swift` |
 | `Line.cs` | What is hanging, and what you can do with it | `Line.swift` |
 | `ScreenshotWatcher.cs` | Notices new screenshots in the Screenshots folder | `ScreenshotWatcher.swift` |
@@ -192,7 +231,7 @@ The icon is drawn in code by `scripts\make-icon.ps1`.
 
 <sub>
 1. On first launch, Pegline asks whether to handle your screenshots. You can change your mind
-from the tray menu at any time. Pegline hides automatically while an app is in full screen.
+in Settings at any time. Pegline hides automatically while an app is in full screen.
 </sub>
 
 <br>

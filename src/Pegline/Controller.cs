@@ -20,6 +20,7 @@ namespace Pegline
         Line line;
         LineWindow panel;
         PinBoard pins;
+        UndoToast toast;
         Tray tray;
         MessageWindow messages;
         HotKey hotKey;
@@ -37,7 +38,7 @@ namespace Pegline
         bool pinned;
         /// <summary>A new screenshot shows itself for a moment, then tucks away.</summary>
         DateTime peekUntil = DateTime.MinValue;
-        DateTime? hotZoneSince, awaySince;
+        DateTime? hotZoneSince, awaySince, tabSince;
         /// <summary>Where the pointer started resting against the top edge.</summary>
         POINT? hotZoneAnchor;
         /// <summary>After a click along the top of the screen the line stays up there hidden until the pointer leaves that band, so it does not come down over tabs or a title bar you are using.</summary>
@@ -55,10 +56,15 @@ namespace Pegline
         ClipboardCapture lastCapture;
         DateTime lastFileArrival = DateTime.MinValue;
 
+        // Settings read 30 times a second are kept here, and refreshed from ApplySettings.
+        bool edgeReveal, pullTab;
+
         /// <summary>How long the pointer rests against the top edge before the line comes down. Short enough to feel instant, long enough that a quick trip to a tab does not trigger it.</summary>
         static readonly TimeSpan RevealDelay = TimeSpan.FromSeconds(0.25);
         /// <summary>How long the pointer is away before the line tucks back up.</summary>
         static readonly TimeSpan RetractDelay = TimeSpan.FromSeconds(0.5);
+        /// <summary>Resting on the pull tab opens the line too, a little more deliberately than the edge.</summary>
+        static readonly TimeSpan TabDelay = TimeSpan.FromSeconds(0.45);
 
         public Controller(Options options)
         {
@@ -67,25 +73,27 @@ namespace Pegline
 
         public void Start()
         {
-            line = new Line { Keep = KeepInScreenshots };
+            line = new Line { Keep = KeepInScreenshots, OpenEditor = OpenEditor };
             panel = new LineWindow(line);
             panel.PlaceOnScreen();
-            UpdateCapacity();
             pins = new PinBoard(line, HangFrom);
+            toast = new UndoToast();
             panel.PinRequested += (item, from, follow) =>
             {
                 line.Detach(item.Id);
                 pins.Pin(item.Path, from, follow);
             };
-            panel.SetLights(LightsWanted());
+            panel.TabClicked += () => { if (!isRevealed) Open(keyboard: false); };
+            panel.CloseRequested += () => { if (isRevealed) Toggle(); };
 
             messages = new MessageWindow();
-            hotKey = new HotKey(messages, 1, MOD_CONTROL | MOD_ALT, 0x54 /* T */, Toggle);
+            hotKey = new HotKey(messages, 1, Shortcut.Load(), ShortcutPressed);
             clipboard = new ClipboardWatcher(messages);
             clipboard.Captured += OnClipboardCapture;
 
             StartWatcher();
             tray = new Tray(Toggle, BuildMenu);
+            ApplySettings();
 
             line.OnFall = Fall;
             line.ItemsChanged += ItemsChanged;
@@ -119,44 +127,25 @@ namespace Pegline
             housekeeping.Start();
 
             LaunchAtLogin.Repair();
+            StartPreviews();
 
-            if (options.Demo)
+            if (!options.Quiet)
             {
-                Delay.Run(1, () =>
+                if (!Settings.GetBool("Toured"))
                 {
-                    keepOpen = true;
-                    wanted = true;
-                    panel.PlaceOnScreen(Monitors.Primary);
-                    Refresh();
-                    Reveal(pinned: true);
-                    DemoStep(0);
-                });
-            }
-
-            if (options.PreviewPin)
-            {
-                Delay.Run(2.5, () =>
+                    // First run: a short tour, then the one question, then a pointer to the tray icon.
+                    Delay.Run(1.0, () => TourWindow.ShowTour(() =>
+                    {
+                        Settings.SetBool("Toured", true);
+                        if (!Inbox.WasOffered) OfferInbox();
+                        ShowTrayTip();
+                    }));
+                }
+                else if (!Inbox.WasOffered)
                 {
-                    keepOpen = true;
-                    wanted = true;
-                    Refresh();
-                    Reveal(pinned: true);
-                    Delay.Run(0.8, panel.PreviewPin);
-                });
+                    Delay.Run(1.2, OfferInbox);
+                }
             }
-
-            if (options.PreviewMenu)
-            {
-                Delay.Run(0.8, () =>
-                {
-                    var primary = Monitors.Primary;
-                    var dpi = primary?.Scale ?? 1;
-                    var center = primary?.Bounds.Center ?? new POINT(600, 400);
-                    Menus.Show(BuildMenu(), new Point(center.X / dpi, center.Y / dpi));
-                });
-            }
-
-            if (!Inbox.WasOffered && !options.Quiet) Delay.Run(1.2, OfferInbox);
 
             if (!Settings.GetBool("Welcomed") && !options.Quiet)
             {
@@ -180,6 +169,8 @@ namespace Pegline
         {
             try
             {
+                // Anything still waiting on an Undo becomes final now.
+                Undo.Commit();
                 tray?.Dispose();
                 hotKey?.Dispose();
                 clipboard?.Dispose();
@@ -196,19 +187,136 @@ namespace Pegline
 
         static void Dispatch(Action action) => Application.Current?.Dispatcher.BeginInvoke(action);
 
+        /// <summary>Development switches that show one part of the app, for screenshots and testing.</summary>
+        void StartPreviews()
+        {
+            Action openLine = () =>
+            {
+                keepOpen = true;
+                wanted = true;
+                panel.PlaceOnScreen(Monitors.Primary);
+                Refresh();
+                Reveal(pinned: true);
+            };
+            if (options.Demo)
+                Delay.Run(1, () =>
+                {
+                    openLine();
+                    DemoStep(0);
+                });
+            if (options.PreviewPin)
+                Delay.Run(2.5, () =>
+                {
+                    openLine();
+                    Delay.Run(0.8, panel.PreviewPin);
+                });
+            if (options.PreviewMenu)
+                Delay.Run(0.8, () =>
+                {
+                    var primary = Monitors.Primary;
+                    var dpi = primary?.Scale ?? 1;
+                    var center = primary?.Bounds.Center ?? new POINT(600, 400);
+                    Menus.Show(BuildMenu(), new Point(center.X / dpi, center.Y / dpi));
+                });
+            switch (options.Preview)
+            {
+                case "settings": Delay.Run(0.8, () => SettingsWindow.ShowFor(this)); break;
+                case "tour": Delay.Run(0.8, () => TourWindow.ShowTour()); break;
+                case "editor": Delay.Run(2.5, () => { var first = line.Live.FirstOrDefault(); if (first != null) OpenEditor(first.Path); }); break;
+                case "editortest": Delay.Run(2.5, () => { var first = line.Live.FirstOrDefault(); if (first != null) MarkupWindow.Exercise(first.Path); }); break;
+                case "preview": Delay.Run(2.5, () => { openLine(); Delay.Run(0.8, panel.PreviewFirst); }); break;
+                case "keyboard": Delay.Run(2.5, () => Open(keyboard: true)); break;
+                case "undo": Delay.Run(2.5, () => { var first = line.Live.FirstOrDefault(); if (first != null) line.Discard(first.Id); }); break;
+                case "tab": Delay.Run(1.5, () => { peekUntil = DateTime.MinValue; SetRevealed(false); }); break;
+                case "history":
+                    Delay.Run(2.5, () =>
+                    {
+                        openLine();
+                        Action report = () => Log.Info($"History: on line [{string.Join(", ", line.Live.Select(i => Path.GetFileNameWithoutExtension(i.Path)))}], {line.OlderCount} older, {line.NewerCount} newer");
+                        report();
+                        line.ScrollOlder(); report();
+                        line.ScrollOlder(); report();
+                        line.ScrollOlder(); report();
+                        line.ScrollNewer(); report();
+                        line.BackToNewest(); report();
+                    });
+                    break;
+            }
+        }
+
         void DemoStep(int step)
         {
             panel.Demo(step);
             Delay.Run(2.2, () => DemoStep(step + 1));
         }
 
-        /// <summary>Fairy lights after sunset, unless switched off from the menu.</summary>
+        /// <summary>Fairy lights after sunset, unless switched off.</summary>
         bool LightsWanted() => options.Night || (!Settings.GetBool("NightLightsOff") && Night.IsDark(DateTime.Now));
 
         /// <summary>A second launch, or the Start menu entry while running: bring the line down.</summary>
         public void ShowFromOutside()
         {
-            if (!isRevealed) Toggle();
+            if (!isRevealed) Open(keyboard: false);
+        }
+
+        // MARK: Settings
+
+        public string WatchFolder => watcher?.Folder ?? "";
+        public Shortcut Shortcut => hotKey?.Shortcut ?? Shortcut.Load();
+        public bool ShortcutWorks => hotKey != null && hotKey.IsRegistered;
+
+        /// <summary>Re-reads the settings that change behaviour while running.</summary>
+        public void ApplySettings()
+        {
+            edgeReveal = !Settings.GetBool("EdgeRevealOff");
+            pullTab = !Settings.GetBool("PullTabOff");
+            UpdateCapacity();
+            UpdateTab();
+            panel.SetLights(LightsWanted());
+        }
+
+        /// <summary>Switches to a new shortcut, or keeps the old one if Windows refuses it.</summary>
+        public bool TrySetShortcut(Shortcut shortcut)
+        {
+            var old = hotKey.Shortcut;
+            hotKey.Dispose();
+            hotKey = new HotKey(messages, 1, shortcut, ShortcutPressed);
+            if (shortcut.IsEmpty || hotKey.IsRegistered)
+            {
+                shortcut.Save();
+                return true;
+            }
+            hotKey.Dispose();
+            hotKey = new HotKey(messages, 1, old, ShortcutPressed);
+            return false;
+        }
+
+        public void OpenScreenshotsFolder() => Shell.OpenFolder(Inbox.IsEnabled ? Inbox.Folder : watcher.Folder);
+
+        public void ChooseFolder()
+        {
+            var picked = FolderPicker.Pick(L("Choose the folder your screenshots are saved to",
+                                             "Elige la carpeta donde se guardan tus capturas",
+                                             "Choisissez le dossier où sont enregistrées vos captures"), watcher.Folder);
+            if (picked == null) return;
+            Settings.SetString("WatchFolder", picked);
+            StartWatcher();
+        }
+
+        public void ResetFolder()
+        {
+            Settings.SetString("WatchFolder", null);
+            StartWatcher();
+        }
+
+        void ShowTrayTip()
+        {
+            if (Settings.GetBool("TrayTipShown")) return;
+            Settings.SetBool("TrayTipShown", true);
+            tray.ShowTip(L("Pegline is running", "Pegline está en marcha", "Pegline est lancé"),
+                         L("Right-click its icon for settings. Windows may hide it under ^ in the taskbar: drag it out to keep it in view.",
+                           "Haz clic derecho en su icono para la configuración. Windows puede ocultarlo bajo ^ en la barra de tareas: arrástralo fuera para tenerlo a la vista.",
+                           "Clic droit sur son icône pour les paramètres. Windows peut la cacher sous ^ dans la barre des tâches : faites-la glisser pour la garder visible."));
         }
 
         // MARK: Screenshots arriving
@@ -343,6 +451,14 @@ namespace Pegline
             if (card != null) Flight.Fall(item.Thumb, card.Value, item.Tilt, panel.Monitor);
         }
 
+        /// <summary>The built-in markup editor. Saving refreshes the photo on the line right away.</summary>
+        void OpenEditor(string path)
+        {
+            // The line steps aside first, so the editor opens in front with the keyboard.
+            if (isRevealed) SetRevealed(false);
+            MarkupWindow.Open(path, saved => line.ReloadChanged());
+        }
+
         /// <summary>Inbox mode: a kept capture goes to the Screenshots folder, where Windows keeps them.</summary>
         string KeepInScreenshots(string path)
         {
@@ -364,7 +480,7 @@ namespace Pegline
 
         // MARK: Inbox mode
 
-        void SetInbox(bool on)
+        public void SetInbox(bool on)
         {
             Inbox.IsEnabled = on;
             Log.Info("Inbox mode " + (on ? "on" : "off"));
@@ -378,9 +494,9 @@ namespace Pegline
                 L("Let Pegline handle your screenshots?",
                   "¿Quieres que Pegline se encargue de tus capturas?",
                   "Laisser Pegline s’occuper de vos captures ?"),
-                L("Screenshots will hang on the line the moment you take them, and they won't pile up in your Screenshots folder. Snips you only copy with Win + Shift + S are caught too. Drag one to a folder to keep it, or discard it with the cross. You can turn this off from the tray icon.",
-                  "Las capturas se colgarán en cuanto las hagas y no se acumularán en tu carpeta de Capturas. También se recogen los recortes que solo copias con Win + Mayús + S. Arrastra una a una carpeta para guardarla, o descártala con la cruz. Puedes desactivarlo desde el icono de la bandeja.",
-                  "Vos captures s’accrocheront au fil dès que vous les prenez, sans s’entasser dans votre dossier Captures d’écran. Les captures simplement copiées avec Win + Maj + S sont récupérées aussi. Glissez-en une dans un dossier pour la garder, ou jetez-la avec la croix. Vous pouvez désactiver cette option depuis l’icône de la barre des tâches."),
+                L("Screenshots will hang on the line the moment you take them, and they won't pile up in your Screenshots folder. Snips you only copy with Win + Shift + S are caught too. Drag one to a folder to keep it, or discard it with the cross. You can change this in Settings.",
+                  "Las capturas se colgarán en cuanto las hagas y no se acumularán en tu carpeta de Capturas. También se recogen los recortes que solo copias con Win + Mayús + S. Arrastra una a una carpeta para guardarla, o descártala con la cruz. Puedes cambiarlo en la configuración.",
+                  "Vos captures s’accrocheront au fil dès que vous les prenez, sans s’entasser dans votre dossier Captures d’écran. Les captures simplement copiées avec Win + Maj + S sont récupérées aussi. Glissez-en une dans un dossier pour la garder, ou jetez-la avec la croix. Vous pouvez changer cela dans les paramètres."),
                 L("Turn on", "Activar", "Activer"),
                 L("Not now", "Ahora no", "Pas maintenant"));
             if (yes) SetInbox(true);
@@ -410,6 +526,7 @@ namespace Pegline
                 });
             }
             lastLiveCount = live;
+            UpdateTab();
         }
 
         /// <summary>Decides whether the window is shown at all: something to show, and nothing full screen on that display.</summary>
@@ -423,6 +540,7 @@ namespace Pegline
             // to notice it pushing against the top edge.
             if (wanted) StartMouseTracking();
             else StopMouseTracking();
+            UpdateTab();
         }
 
         void Present()
@@ -464,6 +582,27 @@ namespace Pegline
                 line.HoveredId = null;
                 panel.ClickThrough = true;
             }
+            UpdateTab();
+        }
+
+        /// <summary>The pull tab shows while photos wait on a tucked-away line.</summary>
+        void UpdateTab() => panel?.SetTab(pullTab && isPresent && !isRevealed && line.LiveCount > 0);
+
+        void ShortcutPressed()
+        {
+            if (isRevealed) Toggle();
+            else Open(keyboard: true);
+        }
+
+        void Open(bool keyboard)
+        {
+            keepOpen = true;
+            wanted = true;
+            panel.PlaceOnScreen();
+            UpdateCapacity();
+            Refresh();
+            Reveal(pinned: true);
+            if (keyboard && isRevealed) panel.EnterKeyboard();
         }
 
         void Toggle()
@@ -480,12 +619,7 @@ namespace Pegline
             }
             else
             {
-                keepOpen = true;
-                wanted = true;
-                panel.PlaceOnScreen();
-                UpdateCapacity();
-                Refresh();
-                Reveal(pinned: true);
+                Open(keyboard: false);
             }
         }
 
@@ -543,7 +677,8 @@ namespace Pegline
             wasDown = down;
 
             bool inBand = TopBand(screen).Contains(mouse);
-            if (pressedNow && inBand && !(isRevealed && panel.HitTest(mouse) != null))
+            bool onControl = panel.OverControl(mouse);
+            if (pressedNow && inBand && !onControl && !(isRevealed && panel.HitTest(mouse) != null))
             {
                 topBandSuppressed = true;
                 hotZoneSince = null;
@@ -575,11 +710,28 @@ namespace Pegline
 
             if (!isRevealed)
             {
+                // The pull tab takes clicks; resting on it opens the line too.
+                bool onTab = panel.OverTab(mouse);
+                panel.ClickThrough = !onTab;
+                if (onTab && !down)
+                {
+                    var since = tabSince ?? now;
+                    tabSince = since;
+                    if (now - since >= TabDelay)
+                    {
+                        tabSince = null;
+                        Refresh();
+                        Reveal();
+                    }
+                    return;
+                }
+                tabSince = null;
+
                 // Resting against the top edge brings the line down on that
                 // display. Not while a button is held: that is a window being
                 // dragged to the top to snap or maximize. And only at rest:
                 // sliding along the edge is someone looking for a browser tab.
-                if (AtTopEdge(screen, mouse) && !down && !topBandSuppressed && !FullScreen.IsActive(screen))
+                if (edgeReveal && AtTopEdge(screen, mouse) && !down && !topBandSuppressed && !FullScreen.IsActive(screen))
                 {
                     int still = (int)Math.Round(12 * screen.Scale);
                     if (hotZoneAnchor == null || Math.Abs(mouse.X - hotZoneAnchor.Value.X) > still)
@@ -619,7 +771,7 @@ namespace Pegline
             bool inside = zone.Contains(mouse);
             if (inside && pinned) pinned = false;
 
-            bool busy = pinned || options.Demo || CardView.IsDragging || line.PressedId != null || now < peekUntil;
+            bool busy = pinned || options.Demo || panel.IsActive || CardView.IsDragging || line.PressedId != null || now < peekUntil;
             if (inside || busy)
             {
                 awaySince = null;
@@ -638,22 +790,25 @@ namespace Pegline
 
         /// <summary>
         /// The window spans the whole width of the display, so it only takes
-        /// the mouse while the pointer is over a photo. Everywhere else, clicks
-        /// go to whatever is underneath.
+        /// the mouse while the pointer is over a photo or one of its controls.
+        /// Everywhere else, clicks go to whatever is underneath.
         /// </summary>
         void UpdateMousePassThrough(POINT mouse)
         {
             if (CardView.IsDragging) return;
             var hit = panel.HitTest(mouse);
-            panel.ClickThrough = hit == null;
+            panel.ClickThrough = hit == null && !panel.OverControl(mouse);
             line.HoveredId = hit;
         }
 
+        /// <summary>As many as fit, or the number chosen in Settings if the screen has room for it.</summary>
         void UpdateCapacity()
         {
             var monitor = panel.Monitor;
             double width = monitor != null ? panel.PixelBounds.Width / monitor.Scale : panel.StageWidth;
-            line.MaxItems = Math.Max(3, Math.Min(12, (int)((width - 200) / Layout.Spacing)));
+            int fits = Math.Max(3, Math.Min(12, (int)((width - 40) / Layout.Spacing)));
+            int chosen = Settings.GetInt("MaxCards");
+            line.MaxItems = chosen > 0 ? Math.Min(chosen, fits) : Math.Max(3, Math.Min(12, (int)((width - 200) / Layout.Spacing)));
         }
 
         void ScreensChanged()
@@ -671,61 +826,17 @@ namespace Pegline
             var menu = new ContextMenu();
             menu.Items.Add(Menus.Item(isRevealed ? L("Hide line", "Ocultar tendedero", "Masquer le fil")
                                                  : L("Show line", "Mostrar tendedero", "Afficher le fil"),
-                                      Toggle, gesture: hotKey.IsRegistered ? "Ctrl+Alt+T" : null));
+                                      Toggle, gesture: ShortcutWorks ? Shortcut.ToString() : null));
             menu.Items.Add(Menus.Item(L("Take everything down", "Descolgar todo", "Tout décrocher"),
                                       line.Clear, enabled: line.LiveCount > 0));
-            menu.Items.Add(Menus.Item(L("Handle screenshots", "Encargarse de las capturas", "S’occuper des captures"),
-                                      () => SetInbox(!Inbox.IsEnabled), check: Inbox.IsEnabled,
-                                      tip: L("Screenshots hang instantly and only what you keep stays in your Screenshots folder",
-                                             "Las capturas se cuelgan al instante y solo lo que guardas queda en tu carpeta de Capturas",
-                                             "Les captures s’accrochent aussitôt et seules celles que vous gardez restent dans Captures d’écran")));
             menu.Items.Add(Menus.Item(L("Open screenshots folder", "Abrir carpeta de capturas", "Ouvrir le dossier des captures"),
-                                      () => Shell.OpenFolder(Inbox.IsEnabled ? Inbox.Folder : watcher.Folder)));
-            bool custom = !string.IsNullOrEmpty(Settings.GetString("WatchFolder"));
-            menu.Items.Add(Menus.Item(L("Watch another folder…", "Vigilar otra carpeta…", "Surveiller un autre dossier…"),
-                                      ChooseFolder, tip: watcher.Folder));
-            if (custom)
-                menu.Items.Add(Menus.Item(L("Use the Windows Screenshots folder", "Usar la carpeta Capturas de Windows", "Utiliser le dossier Captures d’écran de Windows"),
-                                          () => { Settings.SetString("WatchFolder", null); StartWatcher(); }));
-
+                                      OpenScreenshotsFolder));
             menu.Items.Add(new Separator());
-            menu.Items.Add(Menus.Item(L("Sounds", "Sonidos", "Sons"), () => line.SoundOn = !line.SoundOn, check: line.SoundOn));
-            bool lightsOn = !Settings.GetBool("NightLightsOff");
-            menu.Items.Add(Menus.Item(L("Lights after sunset", "Luces al anochecer", "Guirlande à la tombée de la nuit"), () =>
-            {
-                Settings.SetBool("NightLightsOff", lightsOn);
-                panel.SetLights(LightsWanted());
-            }, check: lightsOn));
-            menu.Items.Add(Menus.Item(L("Open at login", "Abrir al iniciar sesión", "Ouvrir à l’ouverture de session"),
-                                      ToggleLaunchAtLogin, check: LaunchAtLogin.IsEnabled));
-
+            menu.Items.Add(Menus.Item(L("Settings…", "Configuración…", "Paramètres…"), () => SettingsWindow.ShowFor(this)));
+            menu.Items.Add(Menus.Item(L("How to use Pegline", "Cómo usar Pegline", "Comment utiliser Pegline"), () => TourWindow.ShowTour()));
             menu.Items.Add(new Separator());
             menu.Items.Add(Menus.Item(L("Quit Pegline", "Salir de Pegline", "Quitter Pegline"), Quit));
             return menu;
-        }
-
-        void ChooseFolder()
-        {
-            var picked = FolderPicker.Pick(L("Choose the folder your screenshots are saved to",
-                                             "Elige la carpeta donde se guardan tus capturas",
-                                             "Choisissez le dossier où sont enregistrées vos captures"), watcher.Folder);
-            if (picked == null) return;
-            Settings.SetString("WatchFolder", picked);
-            StartWatcher();
-        }
-
-        static void ToggleLaunchAtLogin()
-        {
-            try
-            {
-                LaunchAtLogin.Set(!LaunchAtLogin.IsEnabled);
-            }
-            catch (Exception e)
-            {
-                Log.Error("Could not change the login setting", e);
-                Prompt.Tell(L("Could not change the login setting", "No se pudo cambiar el inicio de sesión", "Impossible de modifier le lancement à l’ouverture de session"),
-                            e.Message);
-            }
         }
 
         public void Quit()

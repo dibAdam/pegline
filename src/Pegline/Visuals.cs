@@ -109,6 +109,17 @@ namespace Pegline
             if (hasBounds) Dispatcher.BeginInvoke(new Action(ApplyBounds), DispatcherPriority.Send);
         }
 
+        /// <summary>Whether the window may take focus, for keyboard use. Never by default.</summary>
+        public bool Activatable
+        {
+            set
+            {
+                if (Handle == IntPtr.Zero) return;
+                int ex = GetWindowLong(Handle, GWL_EXSTYLE);
+                SetWindowLong(Handle, GWL_EXSTYLE, value ? ex & ~WS_EX_NOACTIVATE : ex | WS_EX_NOACTIVATE);
+            }
+        }
+
         /// <summary>Clicks pass through to whatever is underneath.</summary>
         public bool ClickThrough
         {

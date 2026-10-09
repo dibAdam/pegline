@@ -29,6 +29,47 @@ namespace Pegline
         public void Dispose() => source.Dispose();
     }
 
+    /// <summary>A keyboard shortcut: modifier flags as RegisterHotKey wants them, and a virtual key.</summary>
+    readonly struct Shortcut
+    {
+        public readonly uint Modifiers, Key;
+
+        public Shortcut(uint modifiers, uint key)
+        {
+            Modifiers = modifiers;
+            Key = key;
+        }
+
+        public static readonly Shortcut Default = new Shortcut(MOD_CONTROL | MOD_ALT, 0x54); // Ctrl+Alt+T
+        public bool IsEmpty => Key == 0;
+
+        /// <summary>The shortcut chosen in Settings, or Ctrl+Alt+T. Stored as modifiers in the high word, key in the low word; -1 means none.</summary>
+        public static Shortcut Load()
+        {
+            int stored = Settings.GetInt("HotKey", int.MinValue);
+            if (stored == int.MinValue) return Default;
+            if (stored == -1) return new Shortcut(0, 0);
+            return new Shortcut((uint)(stored >> 16) & 0xFFFF, (uint)stored & 0xFFFF);
+        }
+
+        public void Save() => Settings.SetInt("HotKey", IsEmpty ? -1 : (int)((Modifiers << 16) | Key));
+
+        public override string ToString()
+        {
+            if (IsEmpty) return Loc.L("None", "Ninguno", "Aucun");
+            var parts = new List<string>();
+            if ((Modifiers & MOD_CONTROL) != 0) parts.Add("Ctrl");
+            if ((Modifiers & MOD_ALT) != 0) parts.Add("Alt");
+            if ((Modifiers & 4) != 0) parts.Add(Loc.L("Shift", "Mayús", "Maj"));
+            if ((Modifiers & 8) != 0) parts.Add("Win");
+            var key = System.Windows.Input.KeyInterop.KeyFromVirtualKey((int)Key);
+            string name = key.ToString();
+            if (key >= System.Windows.Input.Key.D0 && key <= System.Windows.Input.Key.D9) name = name.Substring(1);
+            parts.Add(name);
+            return string.Join("+", parts);
+        }
+    }
+
     /// <summary>
     /// A single global shortcut through RegisterHotKey. Unlike a keyboard hook,
     /// it needs no special permission and costs nothing while idle.
@@ -41,19 +82,25 @@ namespace Pegline
 
         public bool IsRegistered { get; }
 
-        public HotKey(MessageWindow window, int id, uint modifiers, uint key, Action action)
+        bool disposed;
+
+        public Shortcut Shortcut { get; }
+
+        public HotKey(MessageWindow window, int id, Shortcut shortcut, Action action)
         {
             this.window = window;
             this.id = id;
             this.action = action;
+            Shortcut = shortcut;
             window.AddHook(Hook);
-            IsRegistered = RegisterHotKey(window.Handle, id, modifiers | MOD_NOREPEAT, key);
-            if (!IsRegistered) Log.Info("The shortcut is taken by another app");
+            if (shortcut.IsEmpty) return;
+            IsRegistered = RegisterHotKey(window.Handle, id, shortcut.Modifiers | MOD_NOREPEAT, shortcut.Key);
+            if (!IsRegistered) Log.Info($"The shortcut {shortcut} is taken by another app");
         }
 
         IntPtr Hook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == WM_HOTKEY && wParam.ToInt32() == id)
+            if (!disposed && msg == WM_HOTKEY && wParam.ToInt32() == id)
             {
                 handled = true;
                 action();
@@ -63,6 +110,7 @@ namespace Pegline
 
         public void Dispose()
         {
+            disposed = true;
             if (IsRegistered) UnregisterHotKey(window.Handle, id);
         }
     }

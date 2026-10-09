@@ -25,6 +25,8 @@ namespace Pegline
         public bool Night;
         /// <summary>Development: pin the first photo the way the menu does, for testing.</summary>
         public bool PreviewPin;
+        /// <summary>Development: show one part of the app: settings, tour, editor, preview, keyboard, undo or tab.</summary>
+        public string Preview;
 
         public static Options Parse(string[] args)
         {
@@ -43,6 +45,7 @@ namespace Pegline
                     case "--demo": o.Demo = true; break;
                     case "--night": o.Night = true; break;
                     case "--preview-pin": o.PreviewPin = true; break;
+                    case "--preview" when i + 1 < args.Length: o.Preview = args[++i].ToLowerInvariant(); break;
                 }
             }
             return o;

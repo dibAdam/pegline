@@ -79,6 +79,16 @@ namespace Pegline
             }
             if (pins.Count > 0) watch.Start();
         }
+
+        /// <summary>Puts a pin back where it was, for Undo.</summary>
+        internal void Repin(string entry)
+        {
+            var pin = PinWindow.Restore(this, entry);
+            if (pin == null) return;
+            pins.Add(pin);
+            watch.Start();
+            Save();
+        }
     }
 
     sealed class PinWindow : OverlayWindow
@@ -508,7 +518,8 @@ namespace Pegline
             var menu = new ContextMenu();
             menu.Items.Add(Menus.Item(L("Copy", "Copiar", "Copier"), Copy));
             menu.Items.Add(Menus.Item(L("Open", "Abrir", "Ouvrir"), () => Shell.Open(Path)));
-            menu.Items.Add(Menus.Item(L("Edit", "Editar", "Modifier"), () => Shell.Edit(Path)));
+            menu.Items.Add(Menus.Item(L("Mark up", "Marcar", "Annoter"), () => MarkupWindow.Open(Path, null)));
+            menu.Items.Add(Menus.Item(L("Edit in another app", "Editar en otra app", "Modifier dans une autre app"), () => Shell.Edit(Path)));
             menu.Items.Add(Menus.Item(L("Show in Explorer", "Mostrar en el Explorador", "Afficher dans l’Explorateur"), () => Shell.Reveal(Path)));
             menu.Items.Add(new Separator());
             menu.Items.Add(Menus.Item(L("Hang back on the line", "Volver a colgar en el tendedero", "Raccrocher au fil"), () => board.HangBack(this),
@@ -553,17 +564,22 @@ namespace Pegline
             else Unpin();
         }
 
+        /// <summary>Goes to the Recycle Bin once the Undo on offer runs out.</summary>
         void Recycle()
         {
-            if (!FileActions.Recycle(Path)) return;
+            string entry = Describe(), path = Path;
             if (board.Line.SoundOn) Sounds.Recycle();
             Leave();
+            Undo.Offer(L("Moved to the Recycle Bin", "Movida a la Papelera de reciclaje", "Placée dans la Corbeille"),
+                       () => board.Repin(entry), () => FileActions.Recycle(path));
         }
 
         void Unpin()
         {
+            string entry = Describe();
             if (board.Line.SoundOn) Sounds.Pop();
             Leave();
+            Undo.Offer(L("Unpinned", "Desfijada", "Détachée"), () => board.Repin(entry));
         }
 
         /// <summary>It lets go of the screen: a short shrink and fade, then gone.</summary>

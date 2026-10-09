@@ -39,6 +39,22 @@ namespace Pegline
             catch (Exception e) { Log.Error("Could not save " + name, e); }
         }
 
+        public static int GetInt(string name, int fallback = 0)
+        {
+            try
+            {
+                using (var key = Open())
+                    return key.GetValue(name) is int value ? value : fallback;
+            }
+            catch { return fallback; }
+        }
+
+        public static void SetInt(string name, int value)
+        {
+            try { using (var key = Open()) key.SetValue(name, value, RegistryValueKind.DWord); }
+            catch (Exception e) { Log.Error("Could not save " + name, e); }
+        }
+
         public static string GetString(string name)
         {
             try { using (var key = Open()) return key.GetValue(name) as string; }

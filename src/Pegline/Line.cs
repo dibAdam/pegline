@@ -39,13 +39,21 @@ namespace Pegline
     /// <summary>
     /// The line itself: what hangs on it and what you can do with each item.
     /// The files never move unless you move them. The line is only a view onto them.
+    /// It also remembers the captures that fell off the far end, so scrolling
+    /// can bring them back.
     /// </summary>
     sealed class Line
     {
         static readonly Random random = new Random();
-        const string StoreKey = "Pegged";
+        const string StoreKey = "Pegged", ArchiveKey = "Archive";
+        const int ArchiveLimit = 60;
 
         public List<Pegged> Items { get; } = new List<Pegged>();
+
+        /// <summary>Captures that fell off the far end, newest first. Still on disk: scrolling brings them back.</summary>
+        readonly List<string> archive = new List<string>();
+        /// <summary>Newer captures that moved off the near end while looking back, oldest first.</summary>
+        readonly List<string> ahead = new List<string>();
 
         public event Action ItemsChanged;
         public event Action<Pegged> ItemUpdated;
@@ -59,13 +67,18 @@ namespace Pegline
         /// <summary>Inbox mode: moves a kept capture to where screenshots live, and returns its new path.</summary>
         public Func<string, string> Keep;
 
-        Guid? hovered, pressed, dragging, copied;
+        /// <summary>Opens the built-in markup editor on a file.</summary>
+        public Action<string> OpenEditor;
+
+        Guid? hovered, pressed, dragging, copied, selected;
         bool revealed;
 
         public Guid? HoveredId { get => hovered; set => SetState(ref hovered, value); }
         public Guid? PressedId { get => pressed; set => SetState(ref pressed, value); }
         public Guid? DraggingId { get => dragging; set => SetState(ref dragging, value); }
         public Guid? CopiedId { get => copied; set => SetState(ref copied, value); }
+        /// <summary>The photo chosen with the keyboard.</summary>
+        public Guid? SelectedId { get => selected; set => SetState(ref selected, value); }
 
         /// <summary>Whether the line has slid down into view.</summary>
         public bool Revealed
@@ -79,7 +92,27 @@ namespace Pegline
             }
         }
 
-        public int MaxItems { get; set; } = 8;
+        int maxItems = 8;
+
+        /// <summary>How many photos hang at once. Lowering it moves the oldest into history, where scrolling finds them.</summary>
+        public int MaxItems
+        {
+            get => maxItems;
+            set
+            {
+                maxItems = Math.Max(1, value);
+                var live = Live;
+                if (live.Count <= maxItems) return;
+                foreach (var oldest in live.Take(live.Count - maxItems))
+                {
+                    Forget(oldest.Id);
+                    Items.Remove(oldest);
+                    Remember(oldest.Path);
+                }
+                Save();
+                ItemsChanged?.Invoke();
+            }
+        }
 
         public bool SoundOn
         {
@@ -88,6 +121,12 @@ namespace Pegline
         }
 
         public int LiveCount => Items.Count(i => !i.Falling);
+        public List<Pegged> Live => Items.Where(i => !i.Falling).ToList();
+
+        /// <summary>How many older captures scrolling can bring back.</summary>
+        public int OlderCount => archive.Count;
+        /// <summary>How many newer captures are out of view while looking back.</summary>
+        public int NewerCount => ahead.Count;
 
         public Line()
         {
@@ -106,19 +145,29 @@ namespace Pegline
 
         // MARK: Hanging and dropping
 
+        /// <summary>A new capture hangs at the near end. Looking back first returns to the newest.</summary>
         public Guid? Hang(string path, bool quietly = false, bool flying = false)
+        {
+            if (ahead.Count > 0) BackToNewest();
+            return Add(path, Items.Count, quietly, flying, overflow: true);
+        }
+
+        Guid? Add(string path, int index, bool quietly, bool flying, bool overflow)
         {
             if (Items.Any(i => !i.Falling && SamePath(i.Path, path))) return null;
             var thumb = Imaging.LoadThumbnail(path, 480, out _, out _);
             if (thumb == null) return null;
 
             var item = new Pegged(path, thumb) { Flying = flying, LastWrite = LastWriteOf(path), Created = CreatedOf(path) };
-            Items.Add(item);
-            // A full line lets the oldest photo fall off the far end.
-            while (LiveCount > MaxItems)
+            Items.Insert(Math.Max(0, Math.Min(index, Items.Count)), item);
+            archive.RemoveAll(p => SamePath(p, path));
+            ahead.RemoveAll(p => SamePath(p, path));
+            // A full line lets the oldest photo fall off the far end; it is remembered.
+            while (overflow && LiveCount > MaxItems)
             {
                 var oldest = Items.FirstOrDefault(i => !i.Falling);
                 if (oldest == null) break;
+                Remember(oldest.Path);
                 Drop(oldest.Id, quietly: true);
             }
             Save();
@@ -126,6 +175,13 @@ namespace Pegline
             if (!quietly && SoundOn) Sounds.Tink();
             Log.Info("Hung " + System.IO.Path.GetFileName(path));
             return item.Id;
+        }
+
+        void Remember(string path)
+        {
+            archive.RemoveAll(p => SamePath(p, path));
+            archive.Insert(0, path);
+            if (archive.Count > ArchiveLimit) archive.RemoveRange(ArchiveLimit, archive.Count - ArchiveLimit);
         }
 
         /// <summary>The capture has reached the line: the real card takes over.</summary>
@@ -143,8 +199,7 @@ namespace Pegline
             if (item == null || item.Falling) return;
             OnFall?.Invoke(item);
             item.Falling = true;
-            if (hovered == id) hovered = null;
-            if (pressed == id) pressed = null;
+            Forget(id);
             Save();
             ItemsChanged?.Invoke();
             if (!quietly && SoundOn) Sounds.Pop();
@@ -155,34 +210,56 @@ namespace Pegline
             });
         }
 
+        void Forget(Guid id)
+        {
+            if (hovered == id) hovered = null;
+            if (pressed == id) pressed = null;
+            if (selected == id) selected = null;
+        }
+
         /// <summary>Takes a photo off the line without letting it fall: it was pinned to the screen.</summary>
         public void Detach(Guid id)
         {
             var item = Find(id);
             if (item == null || item.Falling) return;
-            if (hovered == id) hovered = null;
-            if (pressed == id) pressed = null;
+            Forget(id);
             Items.Remove(item);
             Save();
             ItemsChanged?.Invoke();
         }
 
+        /// <summary>Takes everything down, with one Undo that puts it all back.</summary>
         public void Clear()
         {
-            var live = Items.Where(i => !i.Falling).ToList();
+            var live = Live;
+            if (live.Count == 0) return;
+            var paths = live.Select(i => i.Path).ToList();
             for (int n = 0; n < live.Count; n++)
             {
                 var item = live[n];
                 bool quietly = n > 0;
                 Delay.Run(0.06 * n, () => Drop(item.Id, quietly));
             }
+            Undo.Offer(Loc.L("Took everything down", "Todo descolgado", "Tout est décroché"), () =>
+            {
+                foreach (var path in paths)
+                    if (File.Exists(path)) Add(path, Items.Count, true, false, overflow: true);
+            });
         }
 
-        /// <summary>Photos whose file was deleted or moved away fall off by themselves.</summary>
+        /// <summary>Photos whose file was deleted or moved away fall off by themselves, and are forgotten.</summary>
         public void Prune()
         {
             foreach (var item in Items.Where(i => !i.Falling).ToList())
                 if (!File.Exists(item.Path)) Drop(item.Id, quietly: true);
+            int before = archive.Count + ahead.Count;
+            archive.RemoveAll(p => !File.Exists(p));
+            ahead.RemoveAll(p => !File.Exists(p));
+            if (archive.Count + ahead.Count != before)
+            {
+                Save();
+                ItemsChanged?.Invoke();
+            }
         }
 
         /// <summary>After editing, the photo on the line shows the new version.</summary>
@@ -199,6 +276,63 @@ namespace Pegline
                 item.Thumb = thumb;
                 ItemUpdated?.Invoke(item);
             }
+        }
+
+        // MARK: Looking back
+
+        /// <summary>
+        /// Brings the most recent capture that fell off back in at the far end.
+        /// When the line is full, the newest one steps out at the near end until
+        /// you scroll back.
+        /// </summary>
+        public bool ScrollOlder()
+        {
+            archive.RemoveAll(p => !File.Exists(p));
+            if (archive.Count == 0) return false;
+            var path = archive[0];
+            archive.RemoveAt(0);
+            var live = Live;
+            if (live.Count >= MaxItems && live.Count > 0)
+            {
+                var newest = live[live.Count - 1];
+                Forget(newest.Id);
+                Items.Remove(newest);
+                ahead.Insert(0, newest.Path);
+            }
+            int first = Items.FindIndex(i => !i.Falling);
+            if (Add(path, first < 0 ? Items.Count : first, true, false, overflow: false) == null)
+            {
+                Save();
+                ItemsChanged?.Invoke();
+            }
+            return true;
+        }
+
+        public bool ScrollNewer()
+        {
+            ahead.RemoveAll(p => !File.Exists(p));
+            if (ahead.Count == 0) return false;
+            var path = ahead[0];
+            ahead.RemoveAt(0);
+            var live = Live;
+            if (live.Count >= MaxItems && live.Count > 0)
+            {
+                var oldest = live[0];
+                Forget(oldest.Id);
+                Items.Remove(oldest);
+                Remember(oldest.Path);
+            }
+            if (Add(path, Items.Count, true, false, overflow: false) == null)
+            {
+                Save();
+                ItemsChanged?.Invoke();
+            }
+            return true;
+        }
+
+        public void BackToNewest()
+        {
+            while (ahead.Count > 0) ScrollNewer();
         }
 
         // MARK: Actions on one photo
@@ -218,8 +352,17 @@ namespace Pegline
             if (item != null) Shell.Open(item.Path);
         }
 
-        /// <summary>Press and hold: open the photo in the image editor.</summary>
+        /// <summary>Press and hold: mark it up in the built-in editor.</summary>
         public void Edit(Guid id)
+        {
+            var item = Find(id);
+            if (item == null) return;
+            if (OpenEditor != null) OpenEditor(item.Path);
+            else Shell.Edit(item.Path);
+        }
+
+        /// <summary>The image editor Windows uses for this kind of file, Paint unless chosen otherwise.</summary>
+        public void EditElsewhere(Guid id)
         {
             var item = Find(id);
             if (item != null) Shell.Edit(item.Path);
@@ -231,13 +374,21 @@ namespace Pegline
             if (item != null) Shell.Reveal(item.Path);
         }
 
-        /// <summary>Sends the file to the Recycle Bin and takes the photo off the line.</summary>
+        /// <summary>
+        /// Takes the photo off the line and sends the file to the Recycle Bin,
+        /// once the Undo on offer has run out.
+        /// </summary>
         public void Trash(Guid id)
         {
             var item = Find(id);
-            if (item == null || !FileActions.Recycle(item.Path)) return;
+            if (item == null) return;
+            string path = item.Path;
+            int at = Items.IndexOf(item);
             if (SoundOn) Sounds.Recycle();
             Drop(id, quietly: true);
+            Undo.Offer(Loc.L("Moved to the Recycle Bin", "Movida a la Papelera de reciclaje", "Placée dans la Corbeille"),
+                       () => Add(path, at, true, false, overflow: true),
+                       () => FileActions.Recycle(path));
         }
 
         /// <summary>
@@ -254,8 +405,17 @@ namespace Pegline
         /// <summary>The corner cross and "Take down" both end up here.</summary>
         public void Discard(Guid id)
         {
-            if (IsInInbox(id)) Trash(id);
-            else Drop(id);
+            if (IsInInbox(id))
+            {
+                Trash(id);
+                return;
+            }
+            var item = Find(id);
+            if (item == null) return;
+            string path = item.Path;
+            int at = Items.IndexOf(item);
+            Drop(id);
+            Undo.Offer(Loc.L("Taken down", "Descolgada", "Décrochée"), () => Add(path, at, true, false, overflow: true));
         }
 
         /// <summary>Inbox mode: keep a screenshot by moving it to the Screenshots folder.</summary>
@@ -287,11 +447,16 @@ namespace Pegline
 
         void Save()
         {
-            Settings.SetStrings(StoreKey, Items.Where(i => !i.Falling).Select(i => i.Path).ToArray());
+            // Newer captures out of view while looking back still belong on the line.
+            var paths = Items.Where(i => !i.Falling).Select(i => i.Path).Concat(ahead).ToArray();
+            Settings.SetStrings(StoreKey, paths);
+            Settings.SetStrings(ArchiveKey, archive.ToArray());
         }
 
         void Restore()
         {
+            foreach (var path in Settings.GetStrings(ArchiveKey))
+                if (File.Exists(path) && archive.Count < ArchiveLimit) archive.Add(path);
             foreach (var path in Settings.GetStrings(StoreKey))
                 if (File.Exists(path)) Hang(path, quietly: true);
         }

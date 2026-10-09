@@ -17,7 +17,7 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
     <DebugType>embedded</DebugType>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Product>Pegline</Product>
     <Description>Screenshots, pegged to a line at the top of your screen.</Description>
     <Copyright>MIT License. A Windows port of Tendedero by Alejandro Buján.</Copyright>
