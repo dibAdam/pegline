@@ -11,15 +11,31 @@ namespace Pegline
     static class FullScreen
     {
         static readonly uint ownProcess = (uint)Process.GetCurrentProcess().Id;
+        static string cachedDevice;
+        static bool cachedResult;
+        static DateTime cachedAt;
 
+        /// <summary>
+        /// Asked many times a second while the pointer rests at the top edge,
+        /// so an answer is reused for a quarter of a second.
+        /// </summary>
         public static bool IsActive(MonitorInfo monitor)
         {
             if (monitor == null) return false;
+            var now = DateTime.UtcNow;
+            if (monitor.Device == cachedDevice && (now - cachedAt).TotalSeconds < 0.25) return cachedResult;
+            cachedResult = Check(monitor);
+            cachedDevice = monitor.Device;
+            cachedAt = now;
+            return cachedResult;
+        }
 
+        static bool Check(MonitorInfo monitor)
+        {
             // Exclusive full screen games and presentation mode.
             try
             {
-                if (SHQueryUserNotificationState(out int state) == 0
+                if (Animator.Timed("notification state", () => SHQueryUserNotificationState(out int st) == 0 ? st : -1) is int state && state >= 0
                     && (state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE))
                 {
                     var fg = GetForegroundWindow();
@@ -35,15 +51,20 @@ namespace Pegline
             var screen = monitor.Bounds;
             EnumWindows((h, _) =>
             {
-                if (!IsWindowVisible(h) || IsIconic(h) || IsCloaked(h)) return true;
-                if (ProcessOf(h) == ownProcess) return true;
-
+                // Cheap questions first. Asking the window manager (cloaking,
+                // the visible frame) costs a round trip per window, so only the
+                // few windows that could matter get asked.
+                if (!IsWindowVisible(h) || IsIconic(h)) return true;
                 int ex = GetWindowLong(h, GWL_EXSTYLE);
                 if ((ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)) != 0) return true;
+                GetWindowRect(h, out RECT rough);
+                if (PxRect.From(rough).Intersect(screen).Area < screen.Area / 2) return true;
+                if (ProcessOf(h) == ownProcess) return true;
 
                 var cls = ClassName(h);
                 if (cls == "Progman" || cls == "WorkerW") return false; // reached the desktop
                 if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return true;
+                if (IsCloaked(h)) return true;
 
                 var frame = FrameBounds(h);
                 var overlap = frame.Intersect(screen);

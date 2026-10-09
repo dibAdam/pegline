@@ -96,6 +96,14 @@ namespace Pegline
             ApplyBounds();
         }
 
+        /// <summary>Moves the window without resizing it: nothing has to be drawn again.</summary>
+        public void MoveTo(int x, int y)
+        {
+            if (Handle == IntPtr.Zero) return;
+            bounds = new PxRect(x, y, bounds.Width, bounds.Height);
+            SetWindowPos(Handle, IntPtr.Zero, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
         public void ApplyBounds()
         {
             if (hasBounds && Handle != IntPtr.Zero)

@@ -29,8 +29,8 @@ namespace Pegline
         const double Spacing = 16;
         /// <summary>How fast a ripple runs along the line. A wave crosses a 1080p display in half a second.</summary>
         const double WaveSpeed = 4000;
-        /// <summary>How quickly movement dies down: a bounce settles in about two seconds.</summary>
-        const double Damping = 3.0;
+        /// <summary>How quickly movement dies down: a bounce settles in a little over a second.</summary>
+        const double Damping = 4.2;
         /// <summary>The line starts beyond the screen edges, so it seems to come from further away.</summary>
         const double Overhang = 20;
         /// <summary>How far a photo of average weight pulls the middle of the line down.</summary>
@@ -196,14 +196,18 @@ namespace Pegline
                 pull = Math.Max(pull, Math.Abs(k * (y[i - 1] - 2 * y[i] + y[i + 1]) + force[i]));
                 shift = Math.Max(shift, Math.Abs(y[i] - drawn[i]));
             }
-            bool resting = !changed && fastest < 0.6 && pull < 4;
-            // The last second of a bounce is mostly sub-pixel: drawing it would cost frames nobody sees.
-            if (shift > Visible || resting) Announce();
+            // Once what is left of a bounce is too small to see, the line is put
+            // straight into its resting shape instead of being stepped through it.
+            bool resting = !changed && fastest < 3 && pull < 30;
             if (resting)
             {
-                for (int i = 0; i < n; i++) v[i] = 0;
+                Settle();
+                Announce();
                 awake = false;
+                return false;
             }
+            // The last part of a bounce is mostly sub-pixel: drawing it would cost frames nobody sees.
+            if (shift > Visible) Announce();
             return awake;
         }
     }

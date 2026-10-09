@@ -123,6 +123,37 @@ namespace Pegline
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROCESS_POWER_THROTTLING_STATE
+        {
+            public uint Version, ControlMask, StateMask;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetProcessInformation(IntPtr process, int infoClass, ref PROCESS_POWER_THROTTLING_STATE info, int size);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr GetCurrentProcess();
+
+        /// <summary>
+        /// Windows 11 slows down processes it thinks are in the background
+        /// (EcoQoS): efficiency cores, low clocks. Pegline never has a window in
+        /// the foreground, so it would be throttled exactly while animating.
+        /// It is idle almost all the time, so asking to run at full speed costs nothing.
+        /// </summary>
+        public static void RunAtFullSpeed()
+        {
+            try
+            {
+                var state = new PROCESS_POWER_THROTTLING_STATE { Version = 1, ControlMask = 0x1 /* EXECUTION_SPEED */, StateMask = 0 };
+                SetProcessInformation(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, ref state, Marshal.SizeOf<PROCESS_POWER_THROTTLING_STATE>());
+            }
+            catch (EntryPointNotFoundException)
+            {
+                // Windows 10 before 1709: no throttling to opt out of.
+            }
+        }
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         public struct MONITORINFOEX
         {

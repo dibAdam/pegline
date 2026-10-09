@@ -30,18 +30,26 @@ namespace Pegline
         static readonly Brush DropEdge = Frozen(new SolidColorBrush(Color.FromArgb(0x90, 0x5A, 0x8C, 0xB0)));
 
         /// <summary>How long the pointer rests on a photo before the big preview opens.</summary>
-        const double PreviewDelay = 0.55;
+        const double PreviewDelay = 0.35;
 
         readonly Line line;
         readonly Canvas stage = new Canvas();
-        readonly Canvas chrome = new Canvas();
         readonly TranslateTransform shift = new TranslateTransform();
         readonly RopeView ropeView = new RopeView();
         readonly LightsView lights = new LightsView();
         readonly Canvas drops = new Canvas { IsHitTestVisible = false };
-        readonly Border hint, tab, older, newer;
-        readonly TextBlock tabCount, olderText, newerText;
-        readonly Motion reveal, hintFade, tabFade;
+        readonly Border hint, older, newer;
+        readonly TextBlock olderText, newerText;
+        readonly Motion reveal, hintFade;
+        /// <summary>Where the window sits when the line is down.</summary>
+        PxRect home;
+        /// <summary>
+        /// Whether the line comes down by moving its window, which needs no
+        /// drawing at all, rather than by moving what is inside it. Not when
+        /// another display sits above, where the window would show, or under a
+        /// taskbar at the top, which it would slide over.
+        /// </summary>
+        bool slides;
         readonly Dictionary<Guid, CardView> cards = new Dictionary<Guid, CardView>();
         readonly DispatcherTimer weather, hoverTimer, unhoverTimer;
         readonly PreviewWindow preview = new PreviewWindow();
@@ -60,8 +68,6 @@ namespace Pegline
 
         /// <summary>A photo asks to come off the line and be pinned to the screen: the photo, where it is on screen, and whether it follows the pointer.</summary>
         public event Action<Pegged, PxRect, bool> PinRequested;
-        /// <summary>The pull tab was clicked.</summary>
-        public event Action TabClicked;
         /// <summary>Escape, from the keyboard.</summary>
         public event Action CloseRequested;
 
@@ -72,7 +78,7 @@ namespace Pegline
             Rope.Moved += OnRopeMoved;
 
             stage.RenderTransform = shift;
-            Content = new Grid { Children = { stage, chrome } };
+            Content = stage;
             stage.Children.Add(ropeView);
             stage.Children.Add(lights);
             hint = MakeHint();
@@ -87,16 +93,8 @@ namespace Pegline
             stage.Children.Add(older);
             stage.Children.Add(newer);
 
-            tab = MakeTab(out tabCount);
-            chrome.Children.Add(tab);
-
-            reveal = new Motion(Hidden, v => shift.Y = v, 0.05);
+            reveal = new Motion(Hidden, ApplyReveal, 0.3);
             hintFade = new Motion(0, v => hint.Opacity = v, 0.002);
-            tabFade = new Motion(0, v =>
-            {
-                tab.Opacity = v;
-                tab.Visibility = v > 0.001 ? Visibility.Visible : Visibility.Collapsed;
-            }, 0.002);
 
             SizeChanged += (s, e) =>
             {
@@ -173,53 +171,6 @@ namespace Pegline
             }
         };
 
-        /// <summary>A small tab hanging from the top edge, with how many photos are waiting behind it.</summary>
-        Border MakeTab(out TextBlock count)
-        {
-            count = new TextBlock
-            {
-                FontFamily = Visuals.UiFont,
-                FontSize = 11,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = Palette.Primary,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 5, 1)
-            };
-            var chevron = new TextBlock
-            {
-                Text = "",
-                FontFamily = Visuals.IconFont,
-                FontSize = 8,
-                Foreground = Palette.Secondary,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            var pin = new Border
-            {
-                Width = 4,
-                Height = 10,
-                CornerRadius = new CornerRadius(1.5),
-                Margin = new Thickness(0, 0, 6, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                Background = new LinearGradientBrush(Color.FromRgb(232, 232, 232), Color.FromRgb(160, 160, 160), 0)
-            };
-            var t = new Border
-            {
-                Height = 20,
-                CornerRadius = new CornerRadius(0, 0, 10, 10),
-                Padding = new Thickness(11, 0, 10, 1),
-                Background = Palette.Capsule,
-                BorderBrush = Palette.Edge,
-                BorderThickness = new Thickness(0.75, 0, 0.75, 0.75),
-                Visibility = Visibility.Collapsed,
-                Cursor = Cursors.Hand,
-                ToolTip = L("Show the line", "Mostrar el tendedero", "Afficher le fil"),
-                Child = new StackPanel { Orientation = Orientation.Horizontal, Children = { pin, count, chevron } },
-                Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 8, ShadowDepth = 2, Direction = 270, Opacity = 0.3 }
-            };
-            t.MouseLeftButtonUp += (s, e) => TabClicked?.Invoke();
-            return t;
-        }
-
         /// <summary>A small clickable label at an end of the line, for looking back through older captures.</summary>
         Border Pill(out TextBlock text, Action click)
         {
@@ -264,10 +215,35 @@ namespace Pegline
             Monitor = monitor;
             var work = monitor.WorkArea;
             var target = new PxRect(work.X, work.Y, work.Width, (int)Math.Ceiling(Layout.PanelHeight * monitor.Scale));
-            if (target.Equals(PixelBounds)) return;
+            if (target.Equals(home) && PixelBounds.Width == target.Width) return;
+            home = target;
+            var above = new PxRect(target.X, target.Y - target.Height - 24, target.Width, target.Height + 24);
+            slides = work.Y == monitor.Bounds.Y
+                     && !Monitors.All.Any(m => !m.SameAs(monitor) && m.Bounds.Intersects(above))
+                     && Environment.GetEnvironmentVariable("PEGLINE_NOSLIDE") != "1";
             StageWidth = work.Width / monitor.Scale;
-            SetPixelBounds(target);
+            ApplyReveal(reveal.Value);
             Relayout();
+        }
+
+        /// <summary>Puts the line at its point between tucked away (Hidden) and down (0).</summary>
+        void ApplyReveal(double offset)
+        {
+            if (home.IsEmpty) return;
+            if (slides)
+            {
+                shift.Y = 0;
+                int y = home.Y + (int)Math.Round(offset * (Monitor?.Scale ?? 1));
+                if (PixelBounds.Width != home.Width || PixelBounds.Height != home.Height || PixelBounds.X != home.X)
+                    SetPixelBounds(new PxRect(home.X, y, home.Width, home.Height));
+                else if (PixelBounds.Y != y)
+                    MoveTo(home.X, y);
+            }
+            else
+            {
+                shift.Y = offset;
+                if (!PixelBounds.Equals(home)) SetPixelBounds(home);
+            }
         }
 
         void Relayout()
@@ -281,7 +257,6 @@ namespace Pegline
             Rope.Resize(w);
             hint.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             Canvas.SetLeft(hint, (w - hint.DesiredSize.Width) / 2);
-            PlaceTab();
             OnRopeMoved();
         }
 
@@ -335,8 +310,6 @@ namespace Pegline
             double hintTarget = items.Count == 0 ? 1 : 0;
             if (hintFade.Target != hintTarget) hintFade.Tween(hintTarget, 0.3, Ease.InOut);
             UpdatePills();
-            tabCount.Text = line.LiveCount.ToString();
-            PlaceTab();
             if (keyboard && line.SelectedId != null && line.Find(line.SelectedId.Value) == null)
                 line.SelectedId = line.Live.LastOrDefault()?.Id;
         }
@@ -345,11 +318,11 @@ namespace Pegline
         {
             if (line.Revealed)
             {
-                reveal.Spring(0, 0.42, 0.82);
+                reveal.Spring(0, 0.32, 0.86);
             }
             else
             {
-                reveal.Tween(Hidden, 0.22, Ease.In);
+                reveal.Tween(Hidden, 0.16, Ease.In);
                 ClickThrough = true;
                 lastPointer = null;
                 preview.HideNow();
@@ -357,33 +330,6 @@ namespace Pegline
             }
             lights.SetRevealed(line.Revealed);
             UpdatePills();
-        }
-
-        // MARK: The pull tab
-
-        /// <summary>Shown while the line is tucked away with photos on it, unless switched off.</summary>
-        public void SetTab(bool show)
-        {
-            tabCount.Text = line.LiveCount.ToString();
-            PlaceTab();
-            double target = show ? 1 : 0;
-            if (tabFade.Target != target) tabFade.Tween(target, show ? 0.25 : 0.12, Ease.Out);
-        }
-
-        void PlaceTab()
-        {
-            tab.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Canvas.SetLeft(tab, (StageWidth - tab.DesiredSize.Width) / 2);
-            Canvas.SetTop(tab, 0);
-        }
-
-        public bool OverTab(POINT p)
-        {
-            if (tab.Visibility != Visibility.Visible || tab.Opacity < 0.5) return false;
-            var local = ToLocal(p);
-            var r = new Rect(Canvas.GetLeft(tab), 0, tab.DesiredSize.Width, tab.DesiredSize.Height);
-            r.Inflate(4, 4);
-            return r.Contains(local);
         }
 
         // MARK: Looking back
@@ -413,7 +359,6 @@ namespace Pegline
         /// <summary>Whether the pointer is over one of the line's own controls, which need the click.</summary>
         public bool OverControl(POINT p)
         {
-            if (OverTab(p)) return true;
             if (!line.Revealed) return false;
             var local = ToLocal(p);
             local.Y -= shift.Y;
@@ -458,6 +403,8 @@ namespace Pegline
                 return;
             }
             unhoverTimer.Stop();
+            // The large image is decoded in the background while the pointer rests.
+            if (cards.TryGetValue(target.Value, out var hovered)) preview.Prefetch(hovered.Item.Path);
             if (keyboard || preview.ShownId != null) ShowPreview(target);
             else hoverTimer.Start();
         }
@@ -722,7 +669,11 @@ namespace Pegline
             double top = Rope.YAt(x) - Layout.PinAbove + Layout.CardOffsetBelowTop;
             var thumb = items[index].Thumb;
             var size = Layout.CardSize(thumb.PixelWidth, thumb.PixelHeight);
-            return ToScreen(new Rect(x - size.Width / 2, top, size.Width, size.Height));
+            // Measured from where the window sits once down, even while it is still sliding.
+            double s = Scale;
+            var r = new Rect(x - size.Width / 2, top, size.Width, size.Height);
+            return new PxRect((int)Math.Round(home.X + r.X * s), (int)Math.Round(home.Y + r.Y * s),
+                              (int)Math.Round(r.Width * s), (int)Math.Round(r.Height * s));
         }
     }
 }

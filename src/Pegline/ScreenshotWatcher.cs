@@ -40,7 +40,7 @@ namespace Pegline
             this.onChange = onChange;
             dispatcher = Application.Current.Dispatcher;
             // Writers often create the file, then fill it; give them a moment.
-            debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
             debounce.Tick += (s, e) => { debounce.Stop(); Scan(); };
         }
 

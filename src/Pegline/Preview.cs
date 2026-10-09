@@ -114,13 +114,36 @@ namespace Pegline
             fade.Tween(0, 0.1, Ease.In, () => { if (ShownId == null) Hide(); });
         }
 
+        readonly System.Collections.Generic.Dictionary<string, (DateTime written, BitmapSource image)> ready =
+            new System.Collections.Generic.Dictionary<string, (DateTime, BitmapSource)>(StringComparer.OrdinalIgnoreCase);
+        readonly System.Collections.Generic.HashSet<string> loading = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Decodes the large image on a worker thread while the pointer is still resting.</summary>
+        public void Prefetch(string path)
+        {
+            DateTime written;
+            try { written = System.IO.File.GetLastWriteTimeUtc(path); }
+            catch { return; }
+            if (ready.TryGetValue(path, out var hit) && hit.written == written) return;
+            if (!loading.Add(path)) return;
+            Pegline.Background.Run(() => Imaging.LoadThumbnail(path, 1400, out _, out _), image =>
+            {
+                loading.Remove(path);
+                if (image == null) return;
+                if (ready.Count > 8) ready.Clear();
+                ready[path] = (written, image);
+            });
+        }
+
         bool Load(string path)
         {
             DateTime written;
             try { written = System.IO.File.GetLastWriteTimeUtc(path); }
             catch { return false; }
             if (path == loadedPath && written == loadedWrite && loaded != null) return true;
-            var image = Imaging.LoadThumbnail(path, 1400, out int w, out int h);
+            BitmapSource image;
+            if (ready.TryGetValue(path, out var hit) && hit.written == written) image = hit.image;
+            else image = Imaging.LoadThumbnail(path, 1400, out _, out _);
             if (image == null) return false;
             loaded = image;
             loadedPath = path;

@@ -544,8 +544,8 @@ namespace Pegline
 
         void Copy()
         {
-            if (!FileActions.Copy(Path)) return;
             badgeT.Tween(1, 0.15, Ease.Out, () => Delay.Run(1, () => badgeT.Tween(0, 0.3, Ease.Out)));
+            FileActions.CopyInBackground(Path);
         }
 
         void Keep()

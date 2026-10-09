@@ -70,6 +70,7 @@ namespace Pegline
                 }
                 if (options.Quit) return;
 
+                if (Environment.GetEnvironmentVariable("PEGLINE_THROTTLED") != "1") Native.RunAtFullSpeed();
                 var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
                 app.DispatcherUnhandledException += (s, e) =>
                 {
@@ -90,6 +91,7 @@ namespace Pegline
                 if (!options.Gpu)
                     System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
                 Theme.Initialize(app);
+                if (Environment.GetEnvironmentVariable("PEGLINE_FRAMES") == "1") Watchdog.Start(app.Dispatcher);
                 var controller = new Controller(options);
                 Listen(name + "-show", controller.ShowFromOutside);
                 Listen(name + "-quit", controller.Quit);

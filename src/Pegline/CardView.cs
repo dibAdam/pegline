@@ -222,19 +222,19 @@ namespace Pegline
             clip.Height = 26 + 2 * ClipRoom;
             body.Children.Add(clip);
 
-            X = new Motion(0, PlaceAt, 0.05);
+            X = new Motion(0, PlaceAt, 0.25);
             swing = new Motion(0, v =>
             {
                 swingAngle = v;
                 ApplyAngle();
-            }, 0.01);
-            arriveY = new Motion(0, v => drop.Y = v, 0.05);
-            opacity = new Motion(0, v => body.Opacity = Math.Max(0, Math.Min(1, v)), 0.002);
+            }, 0.08);
+            arriveY = new Motion(0, v => drop.Y = v, 0.25);
+            opacity = new Motion(0, v => body.Opacity = Math.Max(0, Math.Min(1, v)), 0.004);
             zoom = new Motion(1, v =>
             {
                 zoomTransform.ScaleX = zoomTransform.ScaleY = v;
                 shadeScale.ScaleX = shadeScale.ScaleY = v;
-            }, 0.0005);
+            }, 0.001);
             // Lifting off on hover: the shadow drops further and darkens.
             lift = new Motion(0, v =>
             {
@@ -514,7 +514,7 @@ namespace Pegline
                 return;
             }
             swing.Set(16);
-            swing.SpringWith(0, 46, 2.6);
+            swing.SpringWith(0, 46, 3.4);
             arriveY.Set(-46);
             arriveY.Spring(0, 0.42, 0.72);
             opacity.Set(0);
@@ -550,11 +550,11 @@ namespace Pegline
         public void Breeze(double delay, double degrees) => Delay.Run(delay, () => Nudge(degrees));
 
         /// <summary>The pointer swept past: a push in degrees per second.</summary>
-        public void Blow(double velocity) => swing.Kick(velocity, 0, 38, 2.4, 9);
+        public void Blow(double velocity) => swing.Kick(velocity, 0, 38, 3.6, 9);
 
         void Nudge(double degrees)
         {
-            swing.Tween(degrees, 0.3, Ease.Out, () => swing.SpringWith(0, 38, 2.4));
+            swing.Tween(degrees, 0.3, Ease.Out, () => swing.SpringWith(0, 38, 3.6));
         }
 
         public void RefreshState()

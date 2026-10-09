@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using static Pegline.Loc;
@@ -21,6 +22,7 @@ namespace Pegline
         LineWindow panel;
         PinBoard pins;
         UndoToast toast;
+        TabWindow tab;
         Tray tray;
         MessageWindow messages;
         HotKey hotKey;
@@ -38,7 +40,7 @@ namespace Pegline
         bool pinned;
         /// <summary>A new screenshot shows itself for a moment, then tucks away.</summary>
         DateTime peekUntil = DateTime.MinValue;
-        DateTime? hotZoneSince, awaySince, tabSince;
+        DateTime? hotZoneSince, awaySince;
         /// <summary>Where the pointer started resting against the top edge.</summary>
         POINT? hotZoneAnchor;
         /// <summary>After a click along the top of the screen the line stays up there hidden until the pointer leaves that band, so it does not come down over tabs or a title bar you are using.</summary>
@@ -59,12 +61,11 @@ namespace Pegline
         // Settings read 30 times a second are kept here, and refreshed from ApplySettings.
         bool edgeReveal, pullTab;
 
-        /// <summary>How long the pointer rests against the top edge before the line comes down. Short enough to feel instant, long enough that a quick trip to a tab does not trigger it.</summary>
-        static readonly TimeSpan RevealDelay = TimeSpan.FromSeconds(0.25);
+        /// <summary>How long the pointer rests against the top edge before the line comes down. It has to be still, so this can be short.</summary>
+        static readonly TimeSpan RevealDelay = TimeSpan.FromSeconds(0.15);
+        const double FlightHeadStart = 0.15;
         /// <summary>How long the pointer is away before the line tucks back up.</summary>
-        static readonly TimeSpan RetractDelay = TimeSpan.FromSeconds(0.5);
-        /// <summary>Resting on the pull tab opens the line too, a little more deliberately than the edge.</summary>
-        static readonly TimeSpan TabDelay = TimeSpan.FromSeconds(0.45);
+        static readonly TimeSpan RetractDelay = TimeSpan.FromSeconds(0.4);
 
         public Controller(Options options)
         {
@@ -83,8 +84,16 @@ namespace Pegline
                 line.Detach(item.Id);
                 pins.Pin(item.Path, from, follow);
             };
-            panel.TabClicked += () => { if (!isRevealed) Open(keyboard: false); };
+            tab = new TabWindow();
+            tab.Opened += () => { if (!isRevealed) Open(keyboard: false); };
             panel.CloseRequested += () => { if (isRevealed) Toggle(); };
+            // The windows for flights and drags are made now, while nothing moves,
+            // so the first capture or drag does not wait for them.
+            Delay.Run(1.5, () =>
+            {
+                Flight.Prewarm();
+                DragGhost.Prewarm();
+            });
 
             messages = new MessageWindow();
             hotKey = new HotKey(messages, 1, Shortcut.Load(), ShortcutPressed);
@@ -392,7 +401,7 @@ namespace Pegline
 
             // In inbox mode a snip that was only copied still hangs, unless the
             // tool saved a file as well, which the folder watcher already has.
-            Delay.Run(1.5, () =>
+            Delay.Run(0.9, () =>
             {
                 if (lastFileArrival >= capture.Time.AddSeconds(-1)) return;
                 if (GetClipboardSequenceNumber() != capture.Sequence) return;
@@ -410,16 +419,42 @@ namespace Pegline
             PxRect? from = null;
             if (Imaging.TryReadSize(path, out int w, out int h))
                 from = CaptureGuess.Guess(w, h, capture?.Cursor ?? Cursor(), nearCapture: capture != null);
-            pendingMonitor = from.HasValue ? Monitors.At(from.Value.Center) : capture != null ? Monitors.At(capture.Cursor) : null;
-
-            var id = line.Hang(path, flying: from.HasValue);
-            if (id == null || !from.HasValue) return;
-            // Let the line come down and lay out before measuring the landing spot.
-            var rect = from.Value;
-            Delay.Run(0.03, () => Fly(id.Value, rect));
+            var monitor = from.HasValue ? Monitors.At(from.Value.Center) : capture != null ? Monitors.At(capture.Cursor) : null;
+            HangPrepared(path, from, monitor);
         }
 
-        void Fly(Guid id, PxRect from)
+        /// <summary>A pin goes back on the line: it flies up from where it was stuck.</summary>
+        void HangFrom(string path, PxRect from) => HangPrepared(path, from, Monitors.At(from.Center));
+
+        /// <summary>
+        /// Decodes the card and the flying image on a worker thread first, so
+        /// the line and the flight start without a stall, then hangs it.
+        /// </summary>
+        void HangPrepared(string path, PxRect? from, MonitorInfo monitor)
+        {
+            int pixels = from.HasValue ? Math.Min(2000, Math.Max(400, Math.Max(from.Value.Width, from.Value.Height))) : 0;
+            Background.Run(() =>
+            {
+                var thumb = Imaging.LoadThumbnail(path, 480, out _, out _);
+                var flying = thumb != null && pixels > 0 ? Imaging.LoadThumbnail(path, pixels, out _, out _) : null;
+                return (thumb, flying);
+            }, prepared =>
+            {
+                if (prepared.thumb == null) return;
+                pendingMonitor = monitor;
+                bool flies = from.HasValue && prepared.flying != null;
+                bool wasDown = isRevealed;
+                var id = Animator.Timed("hang", () => line.Hang(path, flying: flies, thumb: prepared.thumb));
+                if (id == null || !flies) return;
+                // Let the line lay out before measuring the landing spot. A line
+                // that was tucked away gets a head start: moving it while the
+                // photo flies slowed both.
+                var rect = from.Value;
+                Delay.Run(wasDown ? 0.02 : FlightHeadStart, () => Fly(id.Value, rect, prepared.flying));
+            });
+        }
+
+        void Fly(Guid id, PxRect from, BitmapSource image)
         {
             var item = line.Find(id);
             var to = panel.CardFrame(id);
@@ -429,18 +464,7 @@ namespace Pegline
                 line.Land(id);
                 return;
             }
-            int pixels = Math.Max(from.Width, from.Height);
-            var image = Imaging.LoadThumbnail(item.Path, Math.Min(2000, Math.Max(400, pixels)), out _, out _) ?? item.Thumb;
-            Flight.Fly(image, from, to.Value, item.Tilt, monitor, () => line.Land(id));
-        }
-
-        /// <summary>A pin goes back on the line: it flies up from where it was stuck.</summary>
-        void HangFrom(string path, PxRect from)
-        {
-            pendingMonitor = Monitors.At(from.Center);
-            var id = line.Hang(path, flying: true);
-            if (id == null) return;
-            Delay.Run(0.03, () => Fly(id.Value, from));
+            Animator.Timed("flight start", () => Flight.Fly(image ?? item.Thumb, from, to.Value, item.Tilt, monitor, () => line.Land(id)));
         }
 
         /// <summary>A discarded card falls over the whole screen, from where it hangs.</summary>
@@ -533,7 +557,7 @@ namespace Pegline
         void Refresh()
         {
             var monitor = Monitors.Find(panel.Monitor?.Device) ?? Monitors.UnderCursor();
-            bool blocked = wanted && FullScreen.IsActive(monitor);
+            bool blocked = wanted && Animator.Timed("full screen check", () => FullScreen.IsActive(monitor));
             if (wanted && !blocked) Present();
             else Dismiss();
             // The pointer is watched while there is a line, even tucked away,
@@ -586,7 +610,24 @@ namespace Pegline
         }
 
         /// <summary>The pull tab shows while photos wait on a tucked-away line.</summary>
-        void UpdateTab() => panel?.SetTab(pullTab && isPresent && !isRevealed && line.LiveCount > 0);
+        void UpdateTab()
+        {
+            if (tab == null || line == null) return;
+            tab.Update(pullTab && isPresent && !isRevealed && line.LiveCount > 0, line.LiveCount,
+                       Monitors.Find(panel.Monitor?.Device) ?? panel.Monitor);
+            UpdateTickRate();
+        }
+
+        /// <summary>
+        /// The pointer is watched 60 times a second while the line is down, so a
+        /// photo answers the hover at once, and 20 times while it waits above.
+        /// </summary>
+        void UpdateTickRate()
+        {
+            if (mouseTimer == null) return;
+            var interval = TimeSpan.FromMilliseconds(isRevealed ? 1000.0 / 60 : 1000.0 / 20);
+            if (mouseTimer.Interval != interval) mouseTimer.Interval = interval;
+        }
 
         void ShortcutPressed()
         {
@@ -626,10 +667,10 @@ namespace Pegline
         void StartMouseTracking()
         {
             if (mouseTimer != null) return;
-            mouseTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(1000.0 / 30) };
+            mouseTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(isRevealed ? 1000.0 / 60 : 1000.0 / 20) };
             mouseTimer.Tick += (s, e) =>
             {
-                try { Tick(); }
+                try { Animator.Timed("tick", Tick); }
                 catch (Exception ex) { Log.Error("Tick failed", ex); }
             };
             mouseTimer.Start();
@@ -710,23 +751,6 @@ namespace Pegline
 
             if (!isRevealed)
             {
-                // The pull tab takes clicks; resting on it opens the line too.
-                bool onTab = panel.OverTab(mouse);
-                panel.ClickThrough = !onTab;
-                if (onTab && !down)
-                {
-                    var since = tabSince ?? now;
-                    tabSince = since;
-                    if (now - since >= TabDelay)
-                    {
-                        tabSince = null;
-                        Refresh();
-                        Reveal();
-                    }
-                    return;
-                }
-                tabSince = null;
-
                 // Resting against the top edge brings the line down on that
                 // display. Not while a button is held: that is a window being
                 // dragged to the top to snap or maximize. And only at rest:

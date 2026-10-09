@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -27,6 +28,9 @@ namespace Pegline
         Ease ease;
         bool springing, tweening;
         Action then;
+
+        /// <summary>Where this motion's setter lives, for the frame log.</summary>
+        public string Owner => apply == null ? "?" : $"{apply.Method.DeclaringType?.Name}.{apply.Method.Name}";
 
         public double Value { get; private set; }
         public double Velocity { get; private set; }
@@ -182,50 +186,151 @@ namespace Pegline
     /// <summary>Runs everything that moves once per rendered frame, and sleeps when nothing does.</summary>
     static class Animator
     {
-        const double MaxFps = 50;
+        const double MaxFps = 100;
         static readonly List<IAnimated> active = new List<IAnimated>();
+        static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
         static bool hooked;
-        static TimeSpan last;
+        static double last = -1;
+        static int raw;
+
+        /// <summary>
+        /// A second heartbeat. Some displays slow their refresh when little on
+        /// screen changes, and WPF then pauses its frames for up to half a second;
+        /// this keeps motion advancing through such a pause instead of freezing
+        /// and jumping.
+        /// </summary>
+        static DispatcherTimer backup;
 
         public static void Add(IAnimated motion)
         {
             if (!active.Contains(motion)) active.Add(motion);
             if (hooked) return;
             hooked = true;
-            last = TimeSpan.Zero;
+            last = -1;
             CompositionTarget.Rendering += OnRendering;
+            if (backup == null)
+            {
+                backup = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(15) };
+                backup.Tick += (s, e) =>
+                {
+                    if (hooked && last >= 0 && clock.Elapsed.TotalSeconds - last > 0.035) Frame(fromBackup: true);
+                };
+            }
+            backup.Start();
         }
 
         static void OnRendering(object sender, EventArgs e)
         {
-            var now = ((RenderingEventArgs)e).RenderingTime;
-            if (now == last) return;
-            // At most 50 frames a second. Uncapped, WPF's CPU renderer can run
-            // ahead of the display and spend three times the time for nothing
-            // anyone sees.
-            if (last != TimeSpan.Zero && (now - last).TotalSeconds < 1 / (MaxFps + 2)) return;
-            double dt = last == TimeSpan.Zero ? 1.0 / 60 : (now - last).TotalSeconds;
+            raw++;
+            Frame(fromBackup: false);
+        }
+
+        /// <summary>
+        /// Time comes from a real clock. WPF's own frame time stands still while
+        /// nothing on screen changes, and waiting for it to move could stall a
+        /// slow, settling motion for half a second at a time.
+        /// </summary>
+        static void Frame(bool fromBackup)
+        {
+            if (!hooked) return;
+            double now = clock.Elapsed.TotalSeconds;
+            // Every frame WPF produces up to about 100 a second; on faster
+            // displays, every other one, where the CPU renderer could not keep
+            // up anyway. A tighter limit would drop frames that arrive a hair early.
+            if (last >= 0 && now - last < 1 / MaxFps) return;
+            if (fromBackup) backupFrames++;
+            double dt = last < 0 ? 1.0 / 60 : now - last;
+            if (last >= 0) Measure(dt);
             last = now;
             dt = Math.Max(0.001, Math.Min(dt, 1.0 / 20));
 
-            foreach (var motion in active.ToArray())
+            Timed($"stepping {active.Count} motions", () =>
             {
-                try
+                foreach (var motion in active.ToArray())
                 {
-                    if (!motion.Step(dt)) active.Remove(motion);
+                    try
+                    {
+                        var watch = Measuring ? System.Diagnostics.Stopwatch.StartNew() : null;
+                        bool more = motion.Step(dt);
+                        if (watch != null && watch.ElapsedMilliseconds >= 6) Log.Info($"Slow: one {(motion is Motion m ? m.Owner : motion.GetType().Name)} step took {watch.ElapsedMilliseconds} ms");
+                        if (!more) active.Remove(motion);
+                    }
+                    catch (Exception ex)
+                    {
+                        active.Remove(motion);
+                        Log.Error("Animation step failed", ex);
+                    }
                 }
-                catch (Exception ex)
-                {
-                    active.Remove(motion);
-                    Log.Error("Animation step failed", ex);
-                }
-            }
+            });
 
             if (active.Count == 0)
             {
                 CompositionTarget.Rendering -= OnRendering;
+                backup?.Stop();
                 hooked = false;
+                Report();
             }
+        }
+
+        // Frame timing, written to the log when PEGLINE_FRAMES=1, to measure smoothness.
+        public static readonly bool Measuring = Environment.GetEnvironmentVariable("PEGLINE_FRAMES") == "1";
+        static int frames, hitches, backupFrames;
+        static double total, worst;
+
+        static void Measure(double dt)
+        {
+            if (!Measuring) return;
+            frames++;
+            total += dt;
+            worst = Math.Max(worst, dt);
+            if (dt > 0.15)
+                Log.Info($"Gap of {dt * 1000:0} ms just ended; running: " +
+                         string.Join(", ", active.Select(m => m is Motion motion ? motion.Owner : m.GetType().Name)));
+            if (dt > 0.025) hitches++;
+            if (total >= 2) Report();
+        }
+
+        /// <summary>Times a step and logs it when it is slow enough to stall a frame.</summary>
+        public static T Timed<T>(string what, Func<T> work)
+        {
+            if (!Measuring) return work();
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var result = work();
+            if (watch.ElapsedMilliseconds >= 12) Log.Info($"Slow: {what} took {watch.ElapsedMilliseconds} ms");
+            return result;
+        }
+
+        public static void Timed(string what, Action work) => Timed<int>(what, () => { work(); return 0; });
+
+        static void Report()
+        {
+            if (!Measuring || frames < 3) return;
+            Log.Info($"Frames: {frames} in {total:0.00}s = {frames / total:0} fps, worst gap {worst * 1000:0} ms, {hitches} gaps over 25 ms, {raw} rendering events, {backupFrames} from the backup");
+            frames = hitches = raw = backupFrames = 0;
+            total = worst = 0;
+        }
+    }
+
+    /// <summary>
+    /// Slow work, like decoding a large screenshot, done on a worker thread so
+    /// the animations never wait for it; the result comes back on the UI thread.
+    /// </summary>
+    static class Background
+    {
+        public static void Run<T>(Func<T> work, Action<T> then)
+        {
+            var dispatcher = System.Windows.Application.Current.Dispatcher;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                T result = default(T);
+                try { result = work(); }
+                catch (Exception e) { Log.Error("Background work failed", e); }
+                dispatcher.BeginInvoke(new Action(() =>
+                {
+                    try { then(result); }
+                    catch (Exception e) { Log.Error("Finishing background work failed", e); }
+                }));
+            });
         }
     }
 

@@ -146,16 +146,17 @@ namespace Pegline
         // MARK: Hanging and dropping
 
         /// <summary>A new capture hangs at the near end. Looking back first returns to the newest.</summary>
-        public Guid? Hang(string path, bool quietly = false, bool flying = false)
+        /// <param name="thumb">Already decoded in the background, so hanging never stalls an animation.</param>
+        public Guid? Hang(string path, bool quietly = false, bool flying = false, BitmapSource thumb = null)
         {
             if (ahead.Count > 0) BackToNewest();
-            return Add(path, Items.Count, quietly, flying, overflow: true);
+            return Add(path, Items.Count, quietly, flying, overflow: true, thumb);
         }
 
-        Guid? Add(string path, int index, bool quietly, bool flying, bool overflow)
+        Guid? Add(string path, int index, bool quietly, bool flying, bool overflow, BitmapSource thumb = null)
         {
             if (Items.Any(i => !i.Falling && SamePath(i.Path, path))) return null;
-            var thumb = Imaging.LoadThumbnail(path, 480, out _, out _);
+            thumb = thumb ?? Imaging.LoadThumbnail(path, 480, out _, out _);
             if (thumb == null) return null;
 
             var item = new Pegged(path, thumb) { Flying = flying, LastWrite = LastWriteOf(path), Created = CreatedOf(path) };
@@ -338,12 +339,14 @@ namespace Pegline
         // MARK: Actions on one photo
 
         /// <summary>Puts the image on the clipboard as a picture and as a file, so it pastes into an app or a folder alike.</summary>
+        /// <summary>"Copied" shows at once; reading and encoding the image happen in the background.</summary>
         public void Copy(Guid id)
         {
             var item = Find(id);
-            if (item == null || !FileActions.Copy(item.Path)) return;
+            if (item == null) return;
             CopiedId = id;
             Delay.Run(1.2, () => { if (CopiedId == id) CopiedId = null; });
+            FileActions.CopyInBackground(item.Path, failed: () => { if (CopiedId == id) CopiedId = null; });
         }
 
         public void Open(Guid id)
@@ -505,6 +508,34 @@ namespace Pegline
                 SystemSounds.Beep.Play();
                 return false;
             }
+        }
+
+        /// <summary>The same, with the slow part, decoding and encoding a large image, off the UI thread.</summary>
+        public static void CopyInBackground(string path, Action failed = null)
+        {
+            Background.Run(() =>
+            {
+                var png = Imaging.PngBytes(path);
+                var full = Imaging.LoadFull(path);
+                return (png, full);
+            }, result =>
+            {
+                try
+                {
+                    if (result.png == null && result.full == null) throw new IOException("Could not read " + path);
+                    var data = new DataObject();
+                    if (result.png != null) data.SetData("PNG", new MemoryStream(result.png), false);
+                    if (result.full != null) data.SetImage(result.full);
+                    data.SetFileDropList(new StringCollection { path });
+                    Retry(() => Clipboard.SetDataObject(data, true));
+                }
+                catch (Exception e)
+                {
+                    Log.Error("Could not copy", e);
+                    SystemSounds.Beep.Play();
+                    failed?.Invoke();
+                }
+            });
         }
 
         /// <summary>

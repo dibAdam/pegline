@@ -176,6 +176,12 @@ Useful switches while developing:
 
 Launching Pegline again while it runs brings the line down.
 
+To measure smoothness, set `PEGLINE_FRAMES=1` before starting it. The log
+(`%LOCALAPPDATA%\Pegline\pegline.log`) then gets the frame rate and longest gap of every
+animation, anything slow enough to cost a frame, and where the app was when it froze.
+`PEGLINE_NOSLIDE=1` brings the line down inside a fixed window instead of sliding the window,
+and `PEGLINE_THROTTLED=1` lets Windows' efficiency mode slow Pegline down, both for comparison.
+
 <details>
 <summary>Inside the app</summary>
 <br>
@@ -187,6 +193,7 @@ Launching Pegline again while it runs brings the line down.
 | `CardView.cs` | One photo: glass frame, clip, swing, breeze, drying, curl, click, hold, drag | `PeggedView.swift`, `GrabArea.swift` |
 | `Rope.cs` | The line as a string under tension, its drawing, and the fairy lights | |
 | `Pins.cs` | Photos pinned to the screen | |
+| `Tab.cs` | The pull tab while photos wait above | |
 | `Editor.cs` | The markup editor | `Markup.swift` |
 | `Preview.cs` | The large preview on hover or keyboard choice | |
 | `Undo.cs` | Undo after taking down or discarding, and its pill | |
@@ -199,7 +206,8 @@ Launching Pegline again while it runs brings the line down.
 | `MessageWindow.cs` | The global shortcut and the clipboard listener | `HotKey.swift` |
 | `FullScreen.cs` | Knows when to stay hidden, and where a capture was taken | `FullScreen.swift` |
 | `Shell.cs` | Opening, editing, Explorer, open at login, the folder picker | `Markup.swift` |
-| `Motion.cs` | Springs and tweens that behave like SwiftUI's | SwiftUI |
+| `Motion.cs` | Springs and tweens that behave like SwiftUI's, and the frame clock | SwiftUI |
+| `Watchdog.cs` | With `PEGLINE_FRAMES=1`, logs where the app was when it froze | |
 | `Theme.cs`, `Theme.xaml` | Light and dark, accent color, Windows 11 style menus | |
 
 The icon is drawn in code by `scripts\make-icon.ps1`.
